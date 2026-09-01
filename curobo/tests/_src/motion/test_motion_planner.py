@@ -3,6 +3,9 @@
 #
 """Unit tests for MotionPlanner class."""
 
+# Standard Library
+from types import SimpleNamespace
+
 # Third Party
 import pytest
 import torch
@@ -252,6 +255,54 @@ class TestMotionPlannerWarmup:
 
 class TestMotionPlannerPlanSinglePose:
     """Test MotionPlanner.plan_pose method."""
+
+    def test_failed_ik_seeds_are_replaced_before_graph_planning(self):
+        """Failed IK seeds are replaced by a successful solution in place."""
+        planner = MotionPlanner.__new__(MotionPlanner)
+        planner._destroyed = True
+        ik_solutions = torch.tensor(
+            [[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]]
+        )
+        planner.ik_solver = SimpleNamespace(
+            solve_pose=lambda *args, **kwargs: SimpleNamespace(
+                success=torch.tensor([[True, False, False, False]]),
+                solution=ik_solutions.clone(),
+                total_time=0.1,
+                solve_time=0.05,
+            )
+        )
+
+        graph_seed_configs: list[torch.Tensor] = []
+
+        def get_graph_seed_trajectories(
+            current_state: JointState, seed_config: torch.Tensor
+        ) -> torch.Tensor:
+            graph_seed_configs.append(seed_config.clone())
+            return torch.zeros((1, 1, 2, 2))
+
+        planner._get_graph_seed_trajectories = get_graph_seed_trajectories
+        planner.graph_planner = object()
+        planner.trajopt_solver = SimpleNamespace(
+            config=SimpleNamespace(num_seeds=4),
+            solve_pose=lambda *args, **kwargs: SimpleNamespace(
+                success=torch.tensor([True]),
+                total_time=0.2,
+                solve_time=0.1,
+            ),
+        )
+        current_state = JointState.from_position(torch.zeros((1, 2)))
+
+        result = planner._plan_pose_single(
+            goal_tool_poses=object(),
+            current_state=current_state,
+            max_attempts=1,
+            enable_graph_attempt=0,
+        )
+
+        assert result.success.item() is True
+        assert len(graph_seed_configs) == 1
+        expected = ik_solutions[:, 0:1, :].repeat(1, 4, 1)
+        assert torch.equal(graph_seed_configs[0], expected)
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
     def test_plan_pose_returns_result(
