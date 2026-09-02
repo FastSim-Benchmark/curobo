@@ -10,7 +10,7 @@ import torch
 # CuRobo
 from curobo._src.geom.collision.buffer_collision import CollisionBuffer
 from curobo._src.geom.collision.collision_scene import SceneCollision, SceneCollisionCfg
-from curobo._src.geom.types import Cuboid, Mesh, SceneCfg
+from curobo._src.geom.types import Cuboid, Mesh, MeshDistanceMode, SceneCfg
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -53,8 +53,95 @@ def test_small_mesh_collision_cost_matches_cuboid(cuda_device_cfg):
     )
 
     cuboid_cost = collision_cost(make_checker(SceneCfg(cuboid=[cuboid])))
-    mesh_cost = collision_cost(make_checker(SceneCfg(mesh=[mesh])))
+    mesh_checker = make_checker(SceneCfg(mesh=[mesh]))
+    assert bool(mesh_checker.data.meshes.use_signed_distance[0, 0].item())
+    mesh_cost = collision_cost(mesh_checker)
 
     assert torch.allclose(mesh_cost, cuboid_cost)
     assert mesh_cost.flatten()[0] > 0.0
     assert torch.all(mesh_cost.flatten()[1:] == 0.0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_open_mesh_uses_two_sided_unsigned_distance(cuda_device_cfg):
+    """Open surfaces must collide identically from either winding side."""
+    vertices = [
+        [-0.5, -0.5, 0.0],
+        [0.5, -0.5, 0.0],
+        [0.5, 0.5, 0.0],
+        [-0.5, 0.5, 0.0],
+    ]
+    faces = [[0, 1, 2], [0, 2, 3]]
+    spheres = torch.tensor(
+        [
+            [
+                [
+                    [0.0, 0.0, 0.20, 0.05],
+                    [0.0, 0.0, -0.20, 0.05],
+                    [0.0, 0.0, 0.04, 0.05],
+                    [0.0, 0.0, -0.04, 0.05],
+                ]
+            ]
+        ],
+        device=cuda_device_cfg.device,
+        dtype=torch.float32,
+    )
+
+    def collision_cost(face_data):
+        mesh = Mesh(
+            name="open_wall",
+            vertices=vertices,
+            faces=face_data,
+            pose=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        )
+        assert mesh.distance_mode == MeshDistanceMode.AUTO
+        checker = SceneCollision.from_config(
+            SceneCollisionCfg(
+                device_cfg=cuda_device_cfg,
+                scene_model=SceneCfg(mesh=[mesh]),
+                cache={"mesh": 1},
+            )
+        )
+        assert not bool(checker.data.meshes.use_signed_distance[0, 0].item())
+        buf = CollisionBuffer.from_shape(spheres.shape, cuda_device_cfg)
+        return checker.get_sphere_distance_raw(
+            query_spheres=spheres,
+            collision_buffer=buf,
+            weight=torch.tensor([1.0], device=cuda_device_cfg.device),
+            activation_distance=torch.tensor([0.01], device=cuda_device_cfg.device),
+        )
+
+    forward_cost = collision_cost(faces)
+    reverse_cost = collision_cost([face[::-1] for face in faces])
+
+    assert torch.all(forward_cost.flatten()[:2] == 0.0)
+    assert torch.all(forward_cost.flatten()[2:] > 0.0)
+    assert torch.allclose(forward_cost, reverse_cost)
+
+
+def test_mesh_distance_mode_accepts_config_strings():
+    """Scene dictionaries expose stable string values for mesh semantics."""
+    scene = SceneCfg.create(
+        {
+            "mesh": {
+                "wall": {
+                    "vertices": [[0.0, 0.0, 0.0]],
+                    "faces": [0, 0, 0],
+                    "distance_mode": "surface",
+                }
+            }
+        }
+    )
+
+    assert scene.mesh[0].distance_mode == MeshDistanceMode.SURFACE
+
+
+def test_mesh_distance_mode_rejects_unknown_values():
+    """Invalid distance semantics must fail at configuration admission."""
+    with pytest.raises(ValueError, match="distance_mode must be one of"):
+        Mesh(
+            name="bad",
+            vertices=[[0.0, 0.0, 0.0]],
+            faces=[0, 0, 0],
+            distance_mode="inside-ish",
+        )

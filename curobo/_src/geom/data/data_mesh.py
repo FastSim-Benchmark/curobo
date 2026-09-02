@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Tuple
 # Third Party
 import numpy as np
 import torch
+import trimesh
 import warp as wp
 
 # CuRobo
@@ -26,7 +27,7 @@ from curobo._src.geom.data.helper_pose import (
     get_obs_idx,
     load_transform_from_inv_pose,
 )
-from curobo._src.geom.types import Mesh, SceneCfg
+from curobo._src.geom.types import Mesh, MeshDistanceMode, SceneCfg
 from curobo._src.types.device_cfg import DeviceCfg
 from curobo._src.types.pose import Pose
 from curobo._src.util.logging import log_and_raise, log_warn
@@ -60,6 +61,9 @@ class WarpMeshCache:
     #: Warp mesh instance with BVH acceleration structure.
     mesh: wp.Mesh
 
+    #: Whether the loaded triangle topology is watertight.
+    is_watertight: bool
+
     def get_bounds(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Get axis-aligned bounding box of the mesh."""
         torch_verts = wp.to_torch(self.mesh.points)
@@ -90,6 +94,7 @@ class MeshData:
         - dims: (num_envs, max_n, 4) - bounding box dimensions [x, y, z, pad]
         - inv_pose: (num_envs, max_n, 8) - inverse pose [x, y, z, qw, qx, qy, qz, pad]
         - enable: (num_envs, max_n) - uint8 flags
+        - use_signed_distance: (num_envs, max_n) - uint8 distance semantics
         - count: (num_envs,) - int32 active counts
     """
 
@@ -104,6 +109,9 @@ class MeshData:
 
     #: Enable flag per mesh. 1 = active, 0 = disabled.
     enable: torch.Tensor
+
+    #: Distance mode per mesh. 1 = signed solid, 0 = unsigned surface.
+    use_signed_distance: torch.Tensor
 
     #: Number of active meshes per environment.
     count: torch.Tensor
@@ -175,6 +183,9 @@ class MeshData:
         inv_pose[..., 3] = 1.0  # Identity quaternion (qw=1)
 
         enable = torch.zeros((num_envs, max_n), dtype=torch.uint8, device=device_cfg.device)
+        use_signed_distance = torch.zeros(
+            (num_envs, max_n), dtype=torch.uint8, device=device_cfg.device
+        )
         count = torch.zeros((num_envs,), device=device_cfg.device, dtype=torch.int32)
         names = [[None for _ in range(max_n)] for _ in range(num_envs)]
         wp_cache: Dict[str, WarpMeshCache] = {}
@@ -184,6 +195,7 @@ class MeshData:
             dims=dims,
             inv_pose=inv_pose,
             enable=enable,
+            use_signed_distance=use_signed_distance,
             count=count,
             names=names,
             wp_cache=wp_cache,
@@ -272,15 +284,35 @@ class MeshData:
     def _load_mesh_to_warp(self, mesh: Mesh) -> WarpMeshCache:
         """Load a cuRobo mesh into Warp with BVH acceleration."""
         verts, faces = mesh.get_mesh_data()
+        triangle_faces = np.asarray(faces).reshape(-1, 3)
+        topology = trimesh.Trimesh(
+            vertices=verts, faces=triangle_faces, process=False
+        )
         v = wp.array(verts, dtype=wp.vec3, device=self._wp_device)
-        f = wp.array(np.ravel(faces), dtype=int, device=self._wp_device)
+        f = wp.array(np.ravel(triangle_faces), dtype=int, device=self._wp_device)
 
         if warp_support_bvh_constructor_type():
             new_mesh = wp.Mesh(points=v, indices=f, bvh_constructor="sah")
         else:
             new_mesh = wp.Mesh(points=v, indices=f)
 
-        return WarpMeshCache(mesh.name, new_mesh.id, v, f, new_mesh)
+        return WarpMeshCache(
+            mesh.name,
+            new_mesh.id,
+            v,
+            f,
+            new_mesh,
+            bool(topology.is_watertight),
+        )
+
+    @staticmethod
+    def _uses_signed_distance(mesh: Mesh, mesh_data: WarpMeshCache) -> bool:
+        """Resolve one mesh's configured distance semantics."""
+        if mesh.distance_mode == MeshDistanceMode.SURFACE:
+            return False
+        if mesh.distance_mode == MeshDistanceMode.SOLID:
+            return True
+        return mesh_data.is_watertight
 
     def _load_mesh_into_cache(self, mesh: Mesh) -> WarpMeshCache:
         """Load a mesh into the Warp cache, reusing existing if already loaded."""
@@ -303,6 +335,7 @@ class MeshData:
 
         if num_meshes == 0:
             self.enable[env_idx, :] = 0
+            self.use_signed_distance[env_idx, :] = 0
             self.count[env_idx] = 0
             self.names[env_idx] = [None] * self.max_n
             return
@@ -313,12 +346,16 @@ class MeshData:
         dims_list = torch.zeros(
             (num_meshes, 3), device=self.device_cfg.device, dtype=self.device_cfg.dtype
         )
+        signed_distance_list = torch.zeros(
+            (num_meshes,), device=self.device_cfg.device, dtype=torch.uint8
+        )
 
         for i, mesh in enumerate(meshes):
             mesh_data = self._load_mesh_into_cache(mesh)
             pose_list.append(mesh.pose)
             id_list[i] = mesh_data.mesh_id
             name_list.append(mesh_data.name)
+            signed_distance_list[i] = int(self._uses_signed_distance(mesh, mesh_data))
             # Compute bounding box dimensions from mesh bounds
             lower, upper = mesh_data.get_bounds()
             dims_list[i] = upper - lower
@@ -330,6 +367,8 @@ class MeshData:
         self.dims[env_idx, :num_meshes, :3] = dims_list
         self.inv_pose[env_idx, :num_meshes, :7] = inv_pose_buffer.get_pose_vector()
         self.enable[env_idx, :num_meshes] = 1
+        self.use_signed_distance[env_idx, :num_meshes] = signed_distance_list
+        self.use_signed_distance[env_idx, num_meshes:] = 0
         self.enable[env_idx, num_meshes:] = 0
         self.names[env_idx] = name_list + [None] * (self.max_n - num_meshes)
         self.count[env_idx] = num_meshes
@@ -363,6 +402,9 @@ class MeshData:
         self.dims[env_idx, current_count, :3] = mesh_dims
         self.inv_pose[env_idx, current_count, :7] = obj_w_pose.get_pose_vector()
         self.enable[env_idx, current_count] = 1
+        self.use_signed_distance[env_idx, current_count] = int(
+            self._uses_signed_distance(mesh, mesh_data)
+        )
         self.names[env_idx][current_count] = mesh_data.name
         self.count[env_idx] += 1
 
@@ -408,6 +450,7 @@ class MeshData:
         obj_w_pose: Optional[Pose] = None,
         env_idx: int = 0,
         mesh_idx: Optional[int] = None,
+        use_signed_distance: bool = False,
     ) -> None:
         """Update or add a mesh using a Warp mesh ID directly.
 
@@ -420,6 +463,8 @@ class MeshData:
             obj_w_pose: Inverse pose. Used if w_obj_pose is None.
             env_idx: Environment index.
             mesh_idx: Index to update. If None, uses name lookup or adds new.
+            use_signed_distance: Use signed solid distance for this mesh. Externally
+                supplied meshes default to two-sided surface distance.
         """
         if w_obj_pose is None and obj_w_pose is None:
             log_and_raise("Either w_obj_pose or obj_w_pose must be provided")
@@ -439,6 +484,7 @@ class MeshData:
         self.mesh_ids[env_idx, mesh_idx] = warp_mesh_id
         self.inv_pose[env_idx, mesh_idx, :7] = obj_w_pose.get_pose_vector()
         self.enable[env_idx, mesh_idx] = 1
+        self.use_signed_distance[env_idx, mesh_idx] = int(use_signed_distance)
         self.names[env_idx][mesh_idx] = name
 
     def set_enabled(self, name: str, enabled: bool, env_idx: int = 0) -> None:
@@ -483,10 +529,12 @@ class MeshData:
         """
         if env_idx is not None:
             self.enable[env_idx, :] = 0
+            self.use_signed_distance[env_idx, :] = 0
             self.count[env_idx] = 0
             self.names[env_idx] = [None] * self.max_n
         else:
             self.enable[:] = 0
+            self.use_signed_distance[:] = 0
             self.count[:] = 0
             self.names = [[None] * self.max_n for _ in range(self.num_envs)]
 
@@ -514,6 +562,9 @@ class MeshData:
         s.dims = wp.from_torch(self.dims.view(-1, 4), dtype=wp.float32)
         s.inv_pose = wp.from_torch(self.inv_pose.view(-1, 8), dtype=wp.float32)
         s.enable = wp.from_torch(self.enable.view(-1), dtype=wp.uint8)
+        s.use_signed_distance = wp.from_torch(
+            self.use_signed_distance.view(-1), dtype=wp.uint8
+        )
         s.n_per_env = wp.from_torch(self.count.view(-1), dtype=wp.int32)
         s.max_n = self.max_n
         s.num_envs = self.num_envs
@@ -535,6 +586,8 @@ class MeshDataWarp:
         dims: Bounding box dimensions [x, y, z, pad]. Shape: (num_envs * max_n, 4).
         inv_pose: Inverse pose [x, y, z, qw, qx, qy, qz, pad]. Shape: (num_envs * max_n, 8).
         enable: Enable flag per mesh. 1 = active, 0 = disabled.
+        use_signed_distance: Distance mode per mesh. 1 = signed solid, 0 =
+            unsigned two-sided surface.
         n_per_env: Number of active meshes per environment.
         max_n: Maximum meshes per environment.
         num_envs: Number of environments.
@@ -545,6 +598,7 @@ class MeshDataWarp:
     dims: wp.array2d(dtype=wp.float32)
     inv_pose: wp.array2d(dtype=wp.float32)
     enable: wp.array(dtype=wp.uint8)
+    use_signed_distance: wp.array(dtype=wp.uint8)
     n_per_env: wp.array(dtype=wp.int32)
     max_n: wp.int32
     num_envs: wp.int32
@@ -621,7 +675,8 @@ def compute_local_sdf(
         local_pt: Query point in obstacle local frame.
 
     Returns:
-        Signed distance: negative inside, positive outside.
+        Signed distance for solid meshes or unsigned distance for two-sided
+        surface meshes.
     """
     flat_idx = get_obs_idx(env_idx, local_idx, obs_set.max_n)
     mesh_id = obs_set.mesh_ids[flat_idx]
@@ -643,8 +698,9 @@ def compute_local_sdf(
     cl_pt = wp.mesh_eval_position(mesh_id, result.face, result.u, result.v)
     dis_length = wp.length(cl_pt - local_pt)
 
-    # Signed distance: negative inside, positive outside
-    return dis_length * result.sign
+    if obs_set.use_signed_distance[flat_idx] == wp.uint8(1):
+        return dis_length * result.sign
+    return dis_length
 
 
 def compute_local_sdf_with_grad(
@@ -669,7 +725,8 @@ def compute_local_sdf_with_grad(
         query_distance: Minimum distance needed for the current collision query.
 
     Returns:
-        vec4(signed_dist, grad_local_x, grad_local_y, grad_local_z).
+        ``vec4(distance, grad_local_x, grad_local_y, grad_local_z)``. Distance
+        is signed for solid meshes and unsigned for two-sided surfaces.
     """
     flat_idx = get_obs_idx(env_idx, local_idx, obs_set.max_n)
     mesh_id = obs_set.mesh_ids[flat_idx]
@@ -694,15 +751,16 @@ def compute_local_sdf_with_grad(
     delta = cl_pt - local_pt
     dis_length = wp.length(delta)
 
-    # Signed distance: negative inside, positive outside
-    signed_dist = dis_length * result.sign
+    sign = wp.float32(1.0)
+    if obs_set.use_signed_distance[flat_idx] == wp.uint8(1):
+        sign = result.sign
+    signed_dist = dis_length * sign
 
-    # -grad(sdf): points toward the obstacle interior on both sides of the
-    # surface, matching the cuboid and voxel conventions. result.sign flips
-    # delta for interior points, where the closest surface point lies in the
-    # opposite direction.
+    # -grad(distance) points toward the closest surface. For signed solids,
+    # result.sign flips delta for interior points to preserve the cuboid and
+    # voxel convention.
     grad_local = wp.vec3(0.0, 0.0, 0.0)
     if dis_length > _SDF_EPS:
-        grad_local = result.sign * delta / dis_length
+        grad_local = sign * delta / dis_length
 
     return wp.vec4(signed_dist, grad_local[0], grad_local[1], grad_local[2])

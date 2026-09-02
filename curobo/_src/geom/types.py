@@ -9,6 +9,7 @@ from __future__ import annotations
 import struct
 import zlib
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 # Third Party
@@ -18,9 +19,9 @@ import trimesh
 import trimesh.scene
 
 # CuRobo
+from curobo._src.geom.mesh_triangulation import triangulate_mesh_faces
 from curobo._src.geom.sphere_fit.fit_spheres import fit_spheres_to_mesh
 from curobo._src.geom.sphere_fit.types import SphereFitType
-from curobo._src.geom.mesh_triangulation import triangulate_mesh_faces
 from curobo._src.types.camera import CameraObservation
 from curobo._src.types.device_cfg import DeviceCfg
 from curobo._src.types.pose import Pose
@@ -129,6 +130,14 @@ class _ArrayTextureImage:
         """Create a PNG chunk."""
         checksum = zlib.crc32(name + data) & 0xFFFFFFFF
         return struct.pack(">I", len(data)) + name + data + struct.pack(">I", checksum)
+
+
+class MeshDistanceMode(str, Enum):
+    """Distance semantics used by mesh collision queries."""
+
+    AUTO = "auto"
+    SOLID = "solid"
+    SURFACE = "surface"
 
 
 @dataclass
@@ -592,8 +601,19 @@ class Mesh(Obstacle):
     #: Face colors of mesh. Should be float in range of [0, 1].
     face_colors: Optional[List[List[float]]] = None
 
+    #: Collision distance semantics. ``auto`` uses signed distance only for
+    #: watertight meshes; ``surface`` always uses two-sided unsigned distance.
+    distance_mode: Union[MeshDistanceMode, str] = MeshDistanceMode.AUTO
+
     def __post_init__(self):
         """Post initialization adds absolute path to file_path and scales vertices."""
+        try:
+            self.distance_mode = MeshDistanceMode(self.distance_mode)
+        except ValueError as exc:
+            valid_modes = ", ".join(mode.value for mode in MeshDistanceMode)
+            raise ValueError(
+                f"mesh distance_mode must be one of: {valid_modes}"
+            ) from exc
         if self.file_path is not None:
             self.file_path = join_path(get_assets_path(), self.file_path)
         if self.urdf_path is not None:
