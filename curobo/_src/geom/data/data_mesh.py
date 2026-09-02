@@ -61,8 +61,8 @@ class WarpMeshCache:
     #: Warp mesh instance with BVH acceleration structure.
     mesh: wp.Mesh
 
-    #: Whether the loaded triangle topology is watertight.
-    is_watertight: bool
+    #: Whether the loaded topology defines a consistently oriented positive volume.
+    has_valid_volume: bool
 
     def get_bounds(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Get axis-aligned bounding box of the mesh."""
@@ -283,8 +283,10 @@ class MeshData:
 
     def _load_mesh_to_warp(self, mesh: Mesh) -> WarpMeshCache:
         """Load a cuRobo mesh into Warp with BVH acceleration."""
-        verts, faces = mesh.get_mesh_data()
+        verts, faces = mesh.get_mesh_data(process=False)
         triangle_faces = np.asarray(faces).reshape(-1, 3)
+        if mesh.distance_mode == MeshDistanceMode.SOLID:
+            _validate_solid_mesh(mesh.name, verts, triangle_faces)
         topology = trimesh.Trimesh(
             vertices=verts, faces=triangle_faces, process=False
         )
@@ -302,7 +304,7 @@ class MeshData:
             v,
             f,
             new_mesh,
-            bool(topology.is_watertight),
+            bool(topology.is_volume),
         )
 
     @staticmethod
@@ -312,7 +314,7 @@ class MeshData:
             return False
         if mesh.distance_mode == MeshDistanceMode.SOLID:
             return True
-        return mesh_data.is_watertight
+        return mesh_data.has_valid_volume
 
     def _load_mesh_into_cache(self, mesh: Mesh) -> WarpMeshCache:
         """Load a mesh into the Warp cache, reusing existing if already loaded."""
@@ -610,6 +612,155 @@ class MeshDataWarp:
 # =============================================================================
 
 _SDF_EPS = 1e-6
+
+
+def _triangles_intersect(first: np.ndarray, second: np.ndarray, eps: float) -> bool:
+    """Return whether two non-adjacent triangles intersect."""
+    first_edges = np.roll(first, -1, axis=0) - first
+    second_edges = np.roll(second, -1, axis=0) - second
+    first_normal = np.cross(first_edges[0], first_edges[1])
+    second_normal = np.cross(second_edges[0], second_edges[1])
+    normal_cross = np.cross(first_normal, second_normal)
+    normal_scale = np.linalg.norm(first_normal) * np.linalg.norm(second_normal)
+    coplanar = (
+        normal_scale > 0.0
+        and np.linalg.norm(normal_cross) <= 1.0e-9 * normal_scale
+    )
+    if coplanar:
+        unit_normal = first_normal / np.linalg.norm(first_normal)
+        coplanar = bool(
+            np.max(np.abs((second - first[0]) @ unit_normal)) <= eps
+        )
+
+    axes = [first_normal, second_normal]
+    if coplanar:
+        axes.extend(np.cross(first_normal, edge) for edge in first_edges)
+        axes.extend(np.cross(first_normal, edge) for edge in second_edges)
+    else:
+        axes.extend(
+            np.cross(first_edge, second_edge)
+            for first_edge in first_edges
+            for second_edge in second_edges
+        )
+
+    for axis in axes:
+        axis_length = np.linalg.norm(axis)
+        if axis_length <= eps:
+            continue
+        axis = axis / axis_length
+        first_projection = first @ axis
+        second_projection = second @ axis
+        if (
+            first_projection.max() < second_projection.min() - eps
+            or second_projection.max() < first_projection.min() - eps
+        ):
+            return False
+    return True
+
+
+def _has_self_intersections(vertices: np.ndarray, faces: np.ndarray, eps: float) -> bool:
+    """Detect intersections between non-adjacent triangles with a sweep broad phase."""
+    triangles = vertices[faces]
+    lower = triangles.min(axis=1)
+    upper = triangles.max(axis=1)
+    order = np.argsort(lower[:, 0], kind="stable")
+    active: List[int] = []
+
+    for face_idx_value in order:
+        face_idx = int(face_idx_value)
+        active = [
+            other_idx
+            for other_idx in active
+            if upper[other_idx, 0] >= lower[face_idx, 0] - eps
+        ]
+        face_vertices = set(faces[face_idx].tolist())
+        for other_idx in active:
+            if face_vertices.intersection(faces[other_idx].tolist()):
+                continue
+            if np.any(upper[other_idx, 1:] < lower[face_idx, 1:] - eps) or np.any(
+                upper[face_idx, 1:] < lower[other_idx, 1:] - eps
+            ):
+                continue
+            if _triangles_intersect(triangles[face_idx], triangles[other_idx], eps):
+                return True
+        active.append(face_idx)
+    return False
+
+
+def _has_non_manifold_vertices(faces: np.ndarray) -> bool:
+    """Return whether any vertex has more than one incident face fan."""
+    vertex_faces: Dict[int, List[int]] = {}
+    edge_faces: Dict[Tuple[int, int], List[int]] = {}
+    for face_idx, face in enumerate(faces):
+        for vertex in face:
+            vertex_faces.setdefault(int(vertex), []).append(face_idx)
+        for first, second in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0])):
+            edge = tuple(sorted((int(first), int(second))))
+            edge_faces.setdefault(edge, []).append(face_idx)
+
+    for vertex, incident_faces in vertex_faces.items():
+        remaining = set(incident_faces)
+        stack = [remaining.pop()]
+        while stack:
+            face_idx = stack.pop()
+            face = faces[face_idx]
+            for other_vertex in face:
+                if int(other_vertex) == vertex:
+                    continue
+                edge = tuple(sorted((vertex, int(other_vertex))))
+                for adjacent_face in edge_faces[edge]:
+                    if adjacent_face in remaining:
+                        remaining.remove(adjacent_face)
+                        stack.append(adjacent_face)
+        if remaining:
+            return True
+    return False
+
+
+def _validate_solid_mesh(name: str, vertices: np.ndarray, faces: np.ndarray) -> None:
+    """Reject triangle data that cannot define a reliable signed solid distance."""
+    vertices = np.asarray(vertices, dtype=np.float64)
+    faces = np.asarray(faces, dtype=np.int64)
+    if vertices.ndim != 2 or vertices.shape[1] != 3 or len(vertices) < 4:
+        raise ValueError(f"mesh '{name}' declared solid but has invalid vertices")
+    if faces.size == 0 or faces.size % 3 != 0:
+        raise ValueError(f"mesh '{name}' declared solid but has invalid triangle indices")
+    faces = faces.reshape(-1, 3)
+    if not np.isfinite(vertices).all():
+        raise ValueError(f"mesh '{name}' declared solid but has non-finite vertices")
+    if faces.min() < 0 or faces.max() >= len(vertices):
+        raise ValueError(f"mesh '{name}' declared solid but has out-of-range indices")
+
+    extent = float(np.max(np.ptp(vertices, axis=0)))
+    eps = max(extent, 1.0) * 1.0e-9
+    triangles = vertices[faces]
+    double_area = np.linalg.norm(
+        np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]),
+        axis=1,
+    )
+    if np.any(double_area <= eps * eps):
+        raise ValueError(f"mesh '{name}' declared solid but has degenerate triangles")
+    canonical_faces = np.sort(faces, axis=1)
+    if len(np.unique(canonical_faces, axis=0)) != len(faces):
+        raise ValueError(f"mesh '{name}' declared solid but has duplicate triangles")
+
+    topology = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    if not topology.is_watertight:
+        raise ValueError(
+            f"mesh '{name}' declared solid but is not a watertight two-manifold"
+        )
+    if _has_non_manifold_vertices(faces):
+        raise ValueError(
+            f"mesh '{name}' declared solid but has a non-manifold vertex"
+        )
+    if not topology.is_winding_consistent:
+        raise ValueError(f"mesh '{name}' declared solid but has inconsistent winding")
+    if _has_self_intersections(vertices, faces, eps):
+        raise ValueError(f"mesh '{name}' declared solid but self-intersects")
+    if not np.isfinite(topology.volume) or topology.volume <= eps**3:
+        raise ValueError(
+            f"mesh '{name}' declared solid but does not have outward positive volume"
+        )
 
 
 def is_obs_enabled(

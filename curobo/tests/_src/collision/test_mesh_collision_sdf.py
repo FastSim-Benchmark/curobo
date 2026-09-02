@@ -145,3 +145,56 @@ def test_mesh_distance_mode_rejects_unknown_values():
             faces=[0, 0, 0],
             distance_mode="inside-ish",
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_auto_mode_does_not_trust_inward_closed_mesh(cuda_device_cfg):
+    """Watertight topology alone is insufficient for signed-distance queries."""
+    cuboid = Cuboid(
+        name="inside_out_box",
+        dims=[0.1, 0.1, 0.1],
+        pose=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+    )
+    trimesh_box = cuboid.get_trimesh_mesh()
+    mesh = Mesh(
+        name="inside_out_box",
+        vertices=trimesh_box.vertices.tolist(),
+        faces=trimesh_box.faces[:, ::-1].tolist(),
+        pose=cuboid.pose,
+    )
+
+    checker = SceneCollision.from_config(
+        SceneCollisionCfg(
+            device_cfg=cuda_device_cfg,
+            scene_model=SceneCfg(mesh=[mesh]),
+            cache={"mesh": 1},
+        )
+    )
+
+    assert not bool(checker.data.meshes.use_signed_distance[0, 0].item())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_open_mesh_declared_solid_fails_scene_admission(cuda_device_cfg):
+    """Explicit solid semantics invoke strict topology validation before upload."""
+    mesh = Mesh(
+        name="invalid_wall_solid",
+        vertices=[
+            [-0.5, -0.5, 0.0],
+            [0.5, -0.5, 0.0],
+            [0.5, 0.5, 0.0],
+            [-0.5, 0.5, 0.0],
+        ],
+        faces=[[0, 1, 2], [0, 2, 3]],
+        pose=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        distance_mode="solid",
+    )
+
+    with pytest.raises(ValueError, match="invalid_wall_solid.*watertight"):
+        SceneCollision.from_config(
+            SceneCollisionCfg(
+                device_cfg=cuda_device_cfg,
+                scene_model=SceneCfg(mesh=[mesh]),
+                cache={"mesh": 1},
+            )
+        )

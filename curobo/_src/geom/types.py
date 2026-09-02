@@ -601,8 +601,9 @@ class Mesh(Obstacle):
     #: Face colors of mesh. Should be float in range of [0, 1].
     face_colors: Optional[List[List[float]]] = None
 
-    #: Collision distance semantics. ``auto`` uses signed distance only for
-    #: watertight meshes; ``surface`` always uses two-sided unsigned distance.
+    #: Collision distance semantics. ``auto`` uses signed distance only for a
+    #: consistently oriented positive volume; ``surface`` always uses two-sided
+    #: unsigned distance.
     distance_mode: Union[MeshDistanceMode, str] = MeshDistanceMode.AUTO
 
     def __post_init__(self):
