@@ -10,6 +10,7 @@ from typing import Optional, Type, Union
 import torch
 
 # CuRobo
+from curobo._src.collision.contact_approach import GoalContact
 from curobo._src.collision.contact_separation import StartContact
 from curobo._src.cost.cost_base_cfg import BaseCostCfg
 from curobo._src.cost.cost_scene_collision import SceneCollisionCost
@@ -51,6 +52,11 @@ class SceneCollisionCostCfg(BaseCostCfg):
     #: Experimental static-support separation declaration for trajectory rollouts only.
     #: Defaults to None; callers must explicitly opt in for a captured initial contact.
     start_contact: Optional[StartContact] = None
+
+    #: Experimental final-support contact declaration; defaults to None (normal checks).
+    #: Set terminal_only on the declaration only for dedicated goal-state IK rollouts.
+    #: Set landing on the declaration to require final normal-line and orientation alignment.
+    goal_contact: Optional[GoalContact] = None
 
     def __post_init__(self):
         if isinstance(self.activation_distance, float):

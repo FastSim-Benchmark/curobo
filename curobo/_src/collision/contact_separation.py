@@ -121,7 +121,13 @@ class ContactSeparation:
 
     def clearance(self, spheres: torch.Tensor) -> torch.Tensor:
         """Return signed sphere/OBB clearance for (..., 4) world-frame spheres."""
-        local = spheres[..., :3] @ self.inverse_rotation.T + self.inverse_position
+        # Matmul may use TF32 and round away the declared micrometer-scale tolerance.
+        local = (
+            spheres[..., 0:1] * self.inverse_rotation[:, 0]
+            + spheres[..., 1:2] * self.inverse_rotation[:, 1]
+            + spheres[..., 2:3] * self.inverse_rotation[:, 2]
+            + self.inverse_position
+        )
         outside = local.abs() - self.half_extents
         return (
             torch.linalg.vector_norm(outside.clamp_min(0.0), dim=-1)
@@ -137,13 +143,10 @@ class ContactSeparation:
         Prefix maxima prevent small successive inward moves from accumulating.
         """
         spheres = robot_spheres.index_select(-2, self.indices)
-        batch, horizon, count, _ = spheres.shape
+        batch, horizon = spheres.shape[:2]
         if horizon < 2:
             log_and_raise("StartContact is a trajectory constraint, not a single-state exemption")
-        dense = spheres[:, :-1, None] + self.fractions[None, None, :, None, None] * (
-            spheres[:, 1:, None] - spheres[:, :-1, None]
-        )
-        dense = torch.cat((dense.reshape(batch, -1, count, 4), spheres[:, -1:]), dim=1)
+        dense = self.interpolate_samples(spheres)
         gap = self.clearance(dense)
         tolerance = self.declaration.numerical_tolerance
         capped = gap.clamp_max(self.declaration.release_clearance)
@@ -162,6 +165,18 @@ class ContactSeparation:
         ).relu()
         first_mask = torch.arange(horizon, device=spheres.device) == 0
         cost = cost + start_error[:, None] * first_mask[None]
+        cost = cost + self.geometry_cost(spheres)
+        return cost[..., None] * self.output_mask
+
+    def interpolate_samples(self, values: torch.Tensor) -> torch.Tensor:
+        """Densify (batch, horizon, ...) values with the bound interval fractions."""
+        fractions = self.fractions.reshape(1, 1, -1, *([1] * (values.ndim - 2)))
+        dense = values[:, :-1, None] + fractions * (values[:, 1:, None] - values[:, :-1, None])
+        dense = dense.reshape(values.shape[0], -1, *values.shape[2:])
+        return torch.cat((dense, values[:, -1:]), dim=1)
+
+    def geometry_cost(self, spheres: torch.Tensor) -> torch.Tensor:
+        """Check captured support and radii for selected (batch, horizon, count, 4) spheres."""
         cuboids = self.scene.data.cuboids
         support_changed = (
             (cuboids.inv_pose[0, self.support_index, :7] - self.captured_inverse_pose).abs().amax()
@@ -169,7 +184,24 @@ class ContactSeparation:
             + (1.0 - cuboids.enable[0, self.support_index].to(torch.float32))
         )
         radius_error = (
-            (spheres[..., 3] - self.initial_spheres[:, 3]).abs().amax(dim=-1) - tolerance
+            (spheres[..., 3] - self.initial_spheres[:, 3]).abs().amax(dim=-1)
+            - self.declaration.numerical_tolerance
         ).relu()
-        cost = cost + support_changed + radius_error
+        return support_changed + radius_error
+
+    def captured_state_cost(self, robot_spheres: torch.Tensor) -> torch.Tensor:
+        """Check the captured endpoint for an explicitly requested single-state query.
+
+        This method supports goal-contact IK checks. It does not validate any
+        trajectory or change the start-contact trajectory-only contract.
+        """
+        if robot_spheres.shape[1] != 1:
+            log_and_raise("Captured contact validation requires a single-state query")
+        spheres = robot_spheres.index_select(-2, self.indices)
+        tolerance = self.declaration.numerical_tolerance
+        endpoint_error = (
+            (spheres - self.initial_spheres).abs().amax(dim=(-1, -2)) - tolerance
+        ).relu()
+        gap_error = (self.initial_clearance - self.clearance(spheres) - tolerance).relu().sum(-1)
+        cost = endpoint_error + gap_error + self.geometry_cost(spheres)
         return cost[..., None] * self.output_mask

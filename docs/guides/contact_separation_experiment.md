@@ -8,6 +8,9 @@ This is an opt-in special-purpose parameter: `SceneCollisionCostCfg.start_contac
 defaults to `None`. Enable it explicitly with a captured `StartContact` declaration
 for a known initial support contact. Attaching a payload does not enable it automatically.
 
+For a contacting placement goal, use the separate opt-in `goal_contact` declaration
+described in the [placement experiment](contact_placement_experiment.md).
+
 Run from an environment with cuRobo and its test dependencies installed:
 
 ```bash

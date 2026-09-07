@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 # CuRobo
+from curobo._src.collision.contact_approach import ContactApproach
 from curobo._src.collision.contact_separation import ContactSeparation
 from curobo._src.cost.cost_base import BaseCost
 from curobo._src.geom.collision.buffer_collision import CollisionBuffer
@@ -35,10 +36,18 @@ class SceneCollisionCost(BaseCost):
         if self.config.scene_collision_checker is None:
             log_and_raise("scene_collision_checker must be set before using world collision cost")
         self._collision_buffer: Optional[CollisionBuffer] = None
-        self._start_contact: Optional[ContactSeparation] = None
+        if self.config.start_contact is not None and self.config.goal_contact is not None:
+            log_and_raise("Simultaneous start_contact and goal_contact are not supported")
+        self._contact: Optional[ContactSeparation | ContactApproach] = None
         if self.config.start_contact is not None:
-            self._start_contact = ContactSeparation(
+            self._contact = ContactSeparation(
                 self.config.start_contact,
+                self.config.scene_collision_checker,
+                self.config.num_spheres,
+            )
+        elif self.config.goal_contact is not None:
+            self._contact = ContactApproach(
+                self.config.goal_contact,
                 self.config.scene_collision_checker,
                 self.config.num_spheres,
             )
@@ -86,7 +95,7 @@ class SceneCollisionCost(BaseCost):
             trajectory_dt,
         )
 
-        if self._start_contact is not None:
+        if self._contact is not None:
             checker = self.config.scene_collision_checker
             arguments = dict(
                 scene=checker.data,
@@ -96,7 +105,7 @@ class SceneCollisionCost(BaseCost):
                 activation_distance=self.config.activation_distance,
                 env_query_idx=idxs_env_query,
                 return_loss=self.config.use_grad_input,
-                replacement_cuboid_ids=self._start_contact.replacement_ids,
+                replacement_cuboid_ids=self._contact.replacement_ids,
             )
             if self.config.use_sweep:
                 distance = checker.checker.get_swept_sphere_distance(
@@ -106,7 +115,15 @@ class SceneCollisionCost(BaseCost):
                 )
             else:
                 distance = checker.checker.get_sphere_distance(**arguments)
-            return distance + self._weight * self._start_contact.cost(state.robot_spheres)
+            if isinstance(self._contact, ContactApproach):
+                contact_cost = self._contact.cost(
+                    state.robot_spheres,
+                    getattr(state, "tool_poses", None),
+                    self.config.activation_distance,
+                )
+            else:
+                contact_cost = self._contact.cost(state.robot_spheres)
+            return distance + self._weight * contact_cost
 
         if self.config.use_sweep:
             return self._sweep_fn(

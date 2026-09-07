@@ -13,11 +13,14 @@ import argparse
 import json
 import statistics
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import torch
 
+from curobo._src.collision.contact_approach import GoalContact
+from curobo._src.collision.contact_landing import NormalLanding
 from curobo._src.collision.contact_separation import StartContact
 from curobo._src.geom.collision.buffer_collision import CollisionBuffer
 from curobo._src.geom.collision.collision_scene import SceneCollision, SceneCollisionCfg
@@ -149,10 +152,17 @@ def make_planner(
     contact_enabled: bool,
     initial_lift: float = 0.0,
     random_seed: int = 123,
+    placement: bool = False,
+    normal_landing: bool = False,
+    placement_goal: tuple[float, float, float] | None = None,
+    support_height: float = 0.0,
+    approach_clearance: float = GoalContact.approach_clearance,
 ) -> tuple[MotionPlanner, JointState, JointState, Scene]:
-    """Bind only trajectory rollouts to the captured payload/support contact."""
+    """Bind trajectory contact and, for placement, dedicated goal-state IK contact."""
     directory.mkdir(parents=True, exist_ok=True)
     scene = build_scene(name)
+    for box in scene.cuboid:
+        box.pose[2] += support_height
     device = DeviceCfg()
     cfg = MotionPlannerCfg.create(
         robot_config(directory),
@@ -161,7 +171,9 @@ def make_planner(
         num_ik_seeds=8,
         num_trajopt_seeds=4,
         use_cuda_graph=True,
-        optimizer_collision_activation_distance=0.005,
+        optimizer_collision_activation_distance=(
+            max(0.005, approach_clearance) if placement and normal_landing else 0.005
+        ),
         interpolation_dt=0.01,
         interpolation_buffer_size=1200,
         random_seed=random_seed,
@@ -172,9 +184,16 @@ def make_planner(
         joint_names=planner.joint_names,
     )
     goal = JointState.from_position(
-        device.to_device([[-0.6, 0, 0.20 if name == "tray" else 0.17]]),
+        device.to_device([[-0.6, 0, (0.20 if name == "tray" else 0.17) + support_height]]),
         joint_names=planner.joint_names,
     )
+    if placement:
+        if placement_goal is None:
+            raise ValueError("Placement requires an explicit world-frame goal position")
+        start = goal
+        goal = JointState.from_position(
+            device.to_device([placement_goal]), joint_names=planner.joint_names
+        )
     payload = device.to_device(
         [
             [0, 0, -0.08, 0.041],
@@ -185,21 +204,48 @@ def make_planner(
     )
     planner.attachment_manager.update(payload, start)
     if contact_enabled:
-        spheres = planner.compute_kinematics(start).robot_spheres.reshape(-1, 4)
+        contact_state = goal if placement else start
+        spheres = planner.compute_kinematics(contact_state).robot_spheres.reshape(-1, 4)
         ids = planner.attachment_manager.kinematics_params.get_sphere_index_from_link_name(
             "attached_object"
         ).tolist()
         # This fixture's bottom sphere is the only initially contacting sphere.
         index = ids[0]
-        contact = StartContact("support", (index,), (tuple(spheres[index].tolist()),))
+        contact_type = GoalContact if placement else StartContact
+        contact = contact_type("support", (index,), (tuple(spheres[index].tolist()),))
+        if placement:
+            contact = replace(contact, approach_clearance=approach_clearance)
+        if placement and normal_landing:
+            tool = planner.compute_kinematics(goal).tool_poses.get_link_pose("gripper")
+            contact = replace(
+                contact,
+                landing=NormalLanding(
+                    tool_frame="gripper",
+                    goal_position=tuple(tool.position.reshape(-1, 3)[0].tolist()),
+                    goal_quaternion=tuple(tool.quaternion.reshape(-1, 4)[0].tolist()),
+                    outward_normal=(0.0, 0.0, 1.0),
+                ),
+            )
         core = cfg.trajopt_solver_config.core_cfg
-        for rollout in [core.metrics_rollout_config, *core.optimizer_rollout_configs]:
-            for field_name in ("cost_cfg", "constraint_cfg", "hybrid_cost_constraint_cfg"):
-                manager = getattr(rollout, field_name)
-                if manager is not None and manager.scene_collision_cfg is not None:
-                    manager.scene_collision_cfg.start_contact = contact
+        contact_cores = [(core, contact)]
+        if placement:
+            contact_cores.append(
+                (cfg.ik_solver_config.core_cfg, replace(contact, terminal_only=True))
+            )
+        for contact_core, core_contact in contact_cores:
+            for rollout in [
+                contact_core.metrics_rollout_config,
+                *contact_core.optimizer_rollout_configs,
+            ]:
+                for field_name in ("cost_cfg", "constraint_cfg", "hybrid_cost_constraint_cfg"):
+                    manager = getattr(rollout, field_name)
+                    if manager is not None and manager.scene_collision_cfg is not None:
+                        if placement:
+                            manager.scene_collision_cfg.goal_contact = core_contact
+                        else:
+                            manager.scene_collision_cfg.start_contact = core_contact
         # Construct the configured solver before any CUDA graph is captured.
-        # IK and PRM retain the original collision contract.
+        # PRM retains the original collision contract.
         del planner
         planner = MotionPlanner(cfg)
         planner.attachment_manager.update(payload, start)
@@ -221,6 +267,8 @@ def validate_trajectory(
     positions: torch.Tensor,
     scene: Scene,
     contact_enabled: bool,
+    placement: bool = False,
+    contact_clearance: float = StartContact.release_clearance,
 ) -> dict:
     """Check all sphere/obstacle pairs independently on 8x denser samples.
 
@@ -265,18 +313,19 @@ def validate_trajectory(
     if contact_enabled:
         forbidden[:, 4, 0] = torch.inf
         native_forbidden[:, 4, 0] = 0
-    prefix = torch.cummax(contact_gap.clamp_max(0.005), dim=0).values
-    regression = float((prefix - contact_gap).clamp_min(0).max())
+    oriented_gap = contact_gap.flip(0) if placement else contact_gap
+    prefix = torch.cummax(oriented_gap.clamp_max(contact_clearance), dim=0).values
+    regression = float((prefix - oriented_gap).clamp_min(0).max())
     minimum_forbidden = float(forbidden.min())
     valid = minimum_forbidden >= -1e-5 and float(native_forbidden.max()) <= 1e-5
     if contact_enabled:
         valid = valid and (
-            float(contact_gap.min()) >= float(contact_gap[0]) - 1e-5
-            and float(contact_gap[-1]) >= 0.005 - 1e-5
+            float(oriented_gap.min()) >= float(oriented_gap[0]) - 1e-5
+            and float(oriented_gap[-1]) >= contact_clearance - 1e-5
             and regression <= 1e-5
         )
     valid = valid and native_error <= 2e-6
-    lifted = positions[0:1].clone()
+    lifted = positions[-1:].clone() if placement else positions[0:1].clone()
     lifted[0, 2] += 0.1
     lifted_spheres = (
         planner.compute_kinematics(
@@ -290,6 +339,7 @@ def validate_trajectory(
         "valid": bool(valid),
         "samples": len(dense),
         "initial_contact_mm": 1000 * float(contact_gap[0]),
+        "terminal_contact_mm": 1000 * float(contact_gap[-1]),
         "minimum_contact_mm": 1000 * float(contact_gap.min()),
         "terminal_support_clearance_mm": 1000 * float(contact_gap[-1]),
         "largest_separation_regression_mm": 1000 * regression,
@@ -306,6 +356,11 @@ def validate_trajectory(
         result["maximum_lift_inside_cabinet_mm"] = 1000 * float(
             (dense[inside, 2] - positions[0, 2]).max()
         )
+        if placement:
+            result["goal_headroom_mm"] = 1000 * float(gaps[-1, :, ceiling_index].min())
+            result["maximum_height_above_placement_inside_cabinet_mm"] = 1000 * float(
+                (dense[inside, 2] - positions[-1, 2]).max()
+            )
     return result
 
 
