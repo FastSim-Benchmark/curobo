@@ -506,7 +506,7 @@ def _launch_collision(
         inputs=[
             data_wp, spheres_wp, weight_wp, eta_wp, env_idx_wp,
             out_cost_wp, out_grad_wp,
-            b, h, n, max_n, wp.uint8(0),
+            b, h, n, max_n, wp.uint8(0), env_idx_wp, wp.uint8(0),
         ],
         stream=stream,
         device=device,
@@ -561,7 +561,7 @@ def _launch_swept_collision(
         inputs=[
             data_wp, spheres_wp, weight_wp, eta_wp, env_idx_wp,
             out_cost_wp, out_grad_wp,
-            b, h, n, max_n, wp.uint8(0),
+            b, h, n, max_n, wp.uint8(0), env_idx_wp, wp.uint8(0),
         ],
         stream=stream,
         device=device,

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 # CuRobo
+from curobo._src.collision.contact_separation import ContactSeparation
 from curobo._src.cost.cost_base import BaseCost
 from curobo._src.geom.collision.buffer_collision import CollisionBuffer
 from curobo._src.util.logging import log_and_raise, log_info
@@ -34,6 +35,13 @@ class SceneCollisionCost(BaseCost):
         if self.config.scene_collision_checker is None:
             log_and_raise("scene_collision_checker must be set before using world collision cost")
         self._collision_buffer: Optional[CollisionBuffer] = None
+        self._start_contact: Optional[ContactSeparation] = None
+        if self.config.start_contact is not None:
+            self._start_contact = ContactSeparation(
+                self.config.start_contact,
+                self.config.scene_collision_checker,
+                self.config.num_spheres,
+            )
 
     def setup_batch_tensors(self, batch_size: int, horizon: int):
         self._batch_size = batch_size
@@ -77,6 +85,28 @@ class SceneCollisionCost(BaseCost):
             idxs_env_query,
             trajectory_dt,
         )
+
+        if self._start_contact is not None:
+            checker = self.config.scene_collision_checker
+            arguments = dict(
+                scene=checker.data,
+                query_sphere=state.robot_spheres,
+                collision_buffer=self._collision_buffer,
+                weight=self._weight,
+                activation_distance=self.config.activation_distance,
+                env_query_idx=idxs_env_query,
+                return_loss=self.config.use_grad_input,
+                replacement_cuboid_ids=self._start_contact.replacement_ids,
+            )
+            if self.config.use_sweep:
+                distance = checker.checker.get_swept_sphere_distance(
+                    **arguments,
+                    trajectory_dt=trajectory_dt,
+                    enable_speed_metric=self.config.use_speed_metric,
+                )
+            else:
+                distance = checker.checker.get_sphere_distance(**arguments)
+            return distance + self._weight * self._start_contact.cost(state.robot_spheres)
 
         if self.config.use_sweep:
             return self._sweep_fn(

@@ -16,7 +16,7 @@ Autograd Functions:
 from __future__ import annotations
 
 # Standard Library
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 # Third Party
 import torch
@@ -53,6 +53,7 @@ class SphereObstacleCollision(torch.autograd.Function):
         env_query_idx: torch.Tensor,
         use_multi_env: bool,
         return_loss: bool = False,
+        replacement_cuboid_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass: compute collision distance to all scene obstacles.
 
@@ -66,6 +67,8 @@ class SphereObstacleCollision(torch.autograd.Function):
             env_query_idx: Environment index per batch element.
             use_multi_env: Whether to use batch-specific environments.
             return_loss: If True, backward uses grad_output for scaling.
+            replacement_cuboid_ids: Optional (num_envs, num_spheres) int32 map of
+                pairs evaluated by a separate contact constraint; -1 keeps the normal query.
 
         Returns:
             Collision distance/cost tensor (batch, horizon, num_spheres).
@@ -83,6 +86,9 @@ class SphereObstacleCollision(torch.autograd.Function):
         out_cost_wp = wp.from_torch(buffer.distance.detach().view(-1))
         out_grad_wp = wp.from_torch(buffer.gradient.detach().view(-1), dtype=wp.float32)
         use_multi_env_wp = wp.uint8(use_multi_env) #wp.uint8(1) if use_multi_env else wp.uint8(0)
+        if replacement_cuboid_ids is None:
+            replacement_cuboid_ids = torch.empty(0, device=query_spheres.device, dtype=torch.int32)
+        replacement_wp = wp.from_torch(replacement_cuboid_ids.view(-1))
 
         for data in scene.get_valid_data():
             max_n = data.max_n
@@ -90,7 +96,12 @@ class SphereObstacleCollision(torch.autograd.Function):
             wp.launch(
                 kernel=sphere_obstacle_collision_kernel,
                 dim=b * h * n * max_n,
-                inputs=[data_wp, spheres_wp, weight_wp, eta_wp, env_idx_wp, out_cost_wp, out_grad_wp, b, h, n, max_n, use_multi_env_wp],
+                inputs=[
+                    data_wp, spheres_wp, weight_wp, eta_wp, env_idx_wp,
+                    out_cost_wp, out_grad_wp, b, h, n, max_n, use_multi_env_wp,
+                    replacement_wp,
+                    wp.uint8(data is scene.cuboids and replacement_cuboid_ids.numel() > 0),
+                ],
                 stream=stream,
                 device=device,
             )
@@ -118,7 +129,8 @@ class SphereObstacleCollision(torch.autograd.Function):
             None,  # env_query_idx
             None,  # use_multi_env
             None,  # return_loss
-        )
+            None,  # replacement_cuboid_ids
+        )[:len(ctx.needs_input_grad)]
 
 
 class SweptSphereObstacleCollision(torch.autograd.Function):
@@ -143,6 +155,7 @@ class SweptSphereObstacleCollision(torch.autograd.Function):
         env_query_idx: torch.Tensor,
         use_multi_env: bool,
         return_loss: bool = False,
+        replacement_cuboid_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass: compute swept collision distance to all scene obstacles.
 
@@ -158,6 +171,8 @@ class SweptSphereObstacleCollision(torch.autograd.Function):
             env_query_idx: Environment index per batch element.
             use_multi_env: Whether to use batch-specific environments.
             return_loss: If True, backward uses grad_output for scaling.
+            replacement_cuboid_ids: Optional (num_envs, num_spheres) int32 map of
+                pairs evaluated by a separate contact constraint; -1 keeps the normal query.
 
         Returns:
             Collision distance/cost tensor (batch, horizon, num_spheres).
@@ -176,6 +191,9 @@ class SweptSphereObstacleCollision(torch.autograd.Function):
         out_cost_wp = wp.from_torch(buffer.distance.detach().view(-1))
         out_grad_wp = wp.from_torch(buffer.gradient.detach().view(-1), dtype=wp.float32)
         use_multi_env_wp = wp.uint8(use_multi_env)
+        if replacement_cuboid_ids is None:
+            replacement_cuboid_ids = torch.empty(0, device=query_spheres.device, dtype=torch.int32)
+        replacement_wp = wp.from_torch(replacement_cuboid_ids.view(-1))
 
         for data in scene.get_valid_data():
             max_n = data.max_n
@@ -196,6 +214,8 @@ class SweptSphereObstacleCollision(torch.autograd.Function):
                     n,
                     max_n,
                     use_multi_env_wp,
+                    replacement_wp,
+                    wp.uint8(data is scene.cuboids and replacement_cuboid_ids.numel() > 0),
                 ],
                 stream=stream,
                 device=device,
@@ -246,4 +266,5 @@ class SweptSphereObstacleCollision(torch.autograd.Function):
             None,  # env_query_idx
             None,  # use_multi_env
             None,  # return_loss
-        )
+            None,  # replacement_cuboid_ids
+        )[:len(ctx.needs_input_grad)]

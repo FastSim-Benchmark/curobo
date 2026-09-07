@@ -10,6 +10,7 @@ from typing import Optional, Type, Union
 import torch
 
 # CuRobo
+from curobo._src.collision.contact_separation import StartContact
 from curobo._src.cost.cost_base_cfg import BaseCostCfg
 from curobo._src.cost.cost_scene_collision import SceneCollisionCost
 from curobo._src.geom.collision.collision_scene import SceneCollision
@@ -46,6 +47,10 @@ class SceneCollisionCostCfg(BaseCostCfg):
 
     #: SceneCollision instance to use for distance queries.
     _scene_collision_checker: Optional[SceneCollision] = None
+
+    #: Experimental static-support separation declaration for trajectory rollouts only.
+    #: Defaults to None; callers must explicitly opt in for a captured initial contact.
+    start_contact: Optional[StartContact] = None
 
     def __post_init__(self):
         if isinstance(self.activation_distance, float):
