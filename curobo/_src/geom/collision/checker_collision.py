@@ -81,13 +81,19 @@ class CollisionChecker:
     ) -> None:
         """Reject malformed pair maps before a native kernel can index their storage."""
         if (
-            replacement_cuboid_ids.shape != (scene.num_envs, query_sphere.shape[-2])
+            replacement_cuboid_ids.ndim not in (2, 3)
+            or replacement_cuboid_ids.shape[:2] != (scene.num_envs, query_sphere.shape[-2])
+            or (
+                replacement_cuboid_ids.ndim == 3
+                and not 1 <= replacement_cuboid_ids.shape[-1] <= 2
+            )
             or replacement_cuboid_ids.dtype != torch.int32
             or replacement_cuboid_ids.device != query_sphere.device
             or not replacement_cuboid_ids.is_contiguous()
         ):
             log_and_raise(
-                "replacement_cuboid_ids must be contiguous int32 (num_envs, num_spheres) "
+                "replacement_cuboid_ids must be contiguous int32 "
+                "(num_envs, num_spheres[, 1 or 2]) "
                 "on the query sphere device"
             )
 
@@ -115,7 +121,7 @@ class CollisionChecker:
             activation_distance: Distance outside obstacles to start computing cost.
             env_query_idx: Environment index for each batch. If None, uses single env.
             return_loss: True if result will be scaled before backward pass.
-            replacement_cuboid_ids: Optional int32 (num_envs, num_spheres) map.
+            replacement_cuboid_ids: Optional int32 (num_envs, num_spheres[, 1 or 2]) map.
                 Nonnegative entries replace that sphere/cuboid pair with an external
                 constraint. The caller must evaluate that constraint; -1 keeps normal checks.
 
@@ -177,7 +183,7 @@ class CollisionChecker:
             enable_speed_metric: Scale collision cost by sphere speed.
             env_query_idx: Environment index for each batch.
             return_loss: True if result will be scaled before backward pass.
-            replacement_cuboid_ids: Optional int32 (num_envs, num_spheres) map.
+            replacement_cuboid_ids: Optional int32 (num_envs, num_spheres[, 1 or 2]) map.
                 Nonnegative entries replace that sphere/cuboid pair with an external
                 constraint. The caller must evaluate that constraint; -1 keeps normal checks.
 

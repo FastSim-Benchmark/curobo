@@ -8,6 +8,10 @@ This is an opt-in special-purpose parameter: `SceneCollisionCostCfg.start_contac
 defaults to `None`. Enable it explicitly with a captured `StartContact` declaration
 for a known initial support contact. Attaching a payload does not enable it automatically.
 
+For request-scoped use, the public planner accepts
+[`allow_boundary_collision`](../reference/boundary_contact.md), including `both`
+for departure and final approach in the same trajectory.
+
 For a contacting placement goal, use the separate opt-in `goal_contact` declaration
 described in the [placement experiment](contact_placement_experiment.md).
 

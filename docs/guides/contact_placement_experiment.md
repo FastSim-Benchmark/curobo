@@ -80,8 +80,10 @@ permitted. A zero-gap target can instead finish at first contact in an exact mod
 
 The implementation evaluates the existing departure constraint with reversed time,
 sharing its support checks, interpolation, and geometry bounds. A moved, resized, or
-disabled support invalidates the declaration. Both `start_contact` and `goal_contact`
-in one query are currently rejected; use separate departure and placement phases.
+disabled support invalidates the declaration. Simultaneous `start_contact` and
+`goal_contact` now support departure and final approach in one trajectory, including
+a shared support. The public [boundary-contact parameter](../reference/boundary_contact.md)
+captures declarations for each planning call without manual cost configuration.
 Contact distances use float32 component arithmetic so global TF32 matmul settings
 cannot round away the declared geometry tolerance. This also applies to departure.
 

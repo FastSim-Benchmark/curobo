@@ -12,6 +12,7 @@ import torch
 # CuRobo
 from curobo._src.collision.contact_approach import ContactApproach
 from curobo._src.collision.contact_separation import ContactSeparation
+from curobo._src.collision.contact_transfer import ContactTransfer
 from curobo._src.cost.cost_base import BaseCost
 from curobo._src.geom.collision.buffer_collision import CollisionBuffer
 from curobo._src.util.logging import log_and_raise, log_info
@@ -36,10 +37,13 @@ class SceneCollisionCost(BaseCost):
         if self.config.scene_collision_checker is None:
             log_and_raise("scene_collision_checker must be set before using world collision cost")
         self._collision_buffer: Optional[CollisionBuffer] = None
+        self._contact: Optional[ContactSeparation | ContactApproach | ContactTransfer] = None
         if self.config.start_contact is not None and self.config.goal_contact is not None:
-            log_and_raise("Simultaneous start_contact and goal_contact are not supported")
-        self._contact: Optional[ContactSeparation | ContactApproach] = None
-        if self.config.start_contact is not None:
+            self._contact = ContactTransfer(
+                self.config.start_contact, self.config.goal_contact,
+                self.config.scene_collision_checker, self.config.num_spheres,
+            )
+        elif self.config.start_contact is not None:
             self._contact = ContactSeparation(
                 self.config.start_contact,
                 self.config.scene_collision_checker,
@@ -115,7 +119,7 @@ class SceneCollisionCost(BaseCost):
                 )
             else:
                 distance = checker.checker.get_sphere_distance(**arguments)
-            if isinstance(self._contact, ContactApproach):
+            if isinstance(self._contact, (ContactApproach, ContactTransfer)):
                 contact_cost = self._contact.cost(
                     state.robot_spheres,
                     getattr(state, "tool_poses", None),

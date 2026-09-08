@@ -16,6 +16,7 @@ Complete API reference auto-generated from source code.
    api_overview
    styleguide
    runtime_configuration
+   boundary_contact
 
 
 

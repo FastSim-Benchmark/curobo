@@ -259,6 +259,15 @@ class SolverCore:
             return
         if not is_cuda_graph_reset_available():
             log_and_raise("CUDA graph reset is not available.")
+        self.invalidate_parameter_graphs()
+
+    def invalidate_parameter_graphs(self) -> None:
+        """Release captured programs whose request-scoped constraints have changed.
+
+        This is the mandatory lifecycle of an explicitly requested constraint,
+        independent of optional shape-change resets. Graph execution stays enabled
+        and captures the next invocation with its own constraint objects.
+        """
         if hasattr(self.optimizer, "reset_cuda_graph"):
             self.optimizer.reset_cuda_graph()
         if hasattr(self.metrics_rollout, "reset_cuda_graph"):
@@ -269,13 +278,7 @@ class SolverCore:
 
     def destroy(self):
         """Release all CUDA graph resources unconditionally."""
-        if hasattr(self.optimizer, "reset_cuda_graph"):
-            self.optimizer.reset_cuda_graph()
-        if hasattr(self.metrics_rollout, "reset_cuda_graph"):
-            self.metrics_rollout.reset_cuda_graph()
-        for rollout in self.additional_metrics_rollouts.values():
-            if hasattr(rollout, "reset_cuda_graph"):
-                rollout.reset_cuda_graph()
+        self.invalidate_parameter_graphs()
 
     # -----------------------------------------------------------------------
     # Goal buffer

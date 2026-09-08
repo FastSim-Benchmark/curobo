@@ -261,13 +261,36 @@ class MotionPlanner:
         enable_graph_attempt: int = 1,
         *,
         hold_axis: Optional[Dict[str, AxisHold]] = None,
+        allow_boundary_collision: str = "none",
     ) -> Optional[TrajOptSolverResult]:
         """Plan to poses with an optional start-referenced axis hold per tool.
 
-        The parameter lasts for this call only. Pose endpoints and collision
-        policies retain their usual meaning; incompatible goals are infeasible.
+        Parameters last for this call only. ``allow_boundary_collision`` accepts
+        ``none``, ``start``, ``end``, or ``both`` for bounded static-cuboid endpoint
+        contacts. Other pairs and self collision retain their ordinary checks.
         """
+        from curobo._src.motion.motion_contact import (
+            boundary_contact_scope,
+            contact_goal_seed,
+            validate_boundary_mode,
+        )
+
+        validate_boundary_mode(allow_boundary_collision)
         with self._hold_axis_scope(hold_axis, current_state):
+            if allow_boundary_collision != "none":
+                goal_state = None
+                if allow_boundary_collision in {"end", "both"}:
+                    goal_state = contact_goal_seed(self, goal_tool_poses, current_state)
+                    if goal_state is None:
+                        return None
+                with boundary_contact_scope(
+                    self, current_state, goal_state, allow_boundary_collision
+                ):
+                    # PRM has ordinary endpoint checks; contact queries use native TrajOpt.
+                    return self._plan_pose(
+                        goal_tool_poses, current_state, use_implicit_goal,
+                        max_attempts, max_attempts,
+                    )
             return self._plan_pose(
                 goal_tool_poses, current_state, use_implicit_goal,
                 max_attempts, enable_graph_attempt,
@@ -399,13 +422,27 @@ class MotionPlanner:
         enable_graph_attempt: int = 1,
         *,
         hold_axis: Optional[Dict[str, AxisHold]] = None,
+        allow_boundary_collision: str = "none",
     ) -> Optional[TrajOptSolverResult]:
         """Plan to exact joints, optionally holding a tool axis from the start.
 
         An incompatible joint endpoint fails instead of being retargeted.
-        The constraint is cleared even when planning raises an exception.
+        ``allow_boundary_collision`` selects bounded static-cuboid contacts at
+        ``start``, ``end``, ``both``, or neither (``none``). Request constraints are
+        cleared even when planning raises an exception.
         """
+        from curobo._src.motion.motion_contact import (
+            boundary_contact_scope,
+            validate_boundary_mode,
+        )
+
+        validate_boundary_mode(allow_boundary_collision)
         with self._hold_axis_scope(hold_axis, current_state):
+            if allow_boundary_collision != "none":
+                with boundary_contact_scope(
+                    self, current_state, goal_state, allow_boundary_collision
+                ):
+                    return self._plan_cspace(goal_state, current_state, max_attempts, max_attempts)
             return self._plan_cspace(
                 goal_state, current_state, max_attempts, enable_graph_attempt,
             )

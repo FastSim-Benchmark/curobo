@@ -87,7 +87,7 @@ def sphere_obstacle_collision_kernel(
     max_n_obs: wp.int32,
     use_multi_env: wp.uint8,
     replacement_cuboid_ids: wp.array(dtype=wp.int32),
-    use_replacement_pairs: wp.uint8,
+    replacement_pair_count: wp.int32,
 ):
     """Compute sphere-obstacle collision with 2D parallelization.
 
@@ -110,8 +110,8 @@ def sphere_obstacle_collision_kernel(
         num_spheres: Number of spheres per timestep.
         max_n_obs: Maximum obstacles per environment.
         use_multi_env: Whether to use batch-specific environments.
-        replacement_cuboid_ids: Flattened (num_envs, num_spheres) replacement map.
-        use_replacement_pairs: Whether this obstacle set uses replacement contact constraints.
+        replacement_cuboid_ids: Flattened (num_envs, num_spheres, replacement_pair_count) map.
+        replacement_pair_count: Number of replacement slots per sphere for this obstacle set.
     """
     tid = wp.tid()
 
@@ -133,10 +133,12 @@ def sphere_obstacle_collision_kernel(
     if not is_obs_enabled(obs_set, env_idx, obs_local_idx):
         return
 
-    if use_replacement_pairs == wp.uint8(1):
+    if replacement_pair_count > 0:
         sphere_idx = sph_flat_idx % num_spheres
-        if replacement_cuboid_ids[env_idx * num_spheres + sphere_idx] == obs_local_idx:
-            return
+        offset = (env_idx * num_spheres + sphere_idx) * replacement_pair_count
+        for slot in range(replacement_pair_count):
+            if replacement_cuboid_ids[offset + slot] == obs_local_idx:
+                return
 
     # Load parameters
     eta = activation_distance[0]

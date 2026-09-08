@@ -67,8 +67,9 @@ class SphereObstacleCollision(torch.autograd.Function):
             env_query_idx: Environment index per batch element.
             use_multi_env: Whether to use batch-specific environments.
             return_loss: If True, backward uses grad_output for scaling.
-            replacement_cuboid_ids: Optional (num_envs, num_spheres) int32 map of
-                pairs evaluated by a separate contact constraint; -1 keeps the normal query.
+            replacement_cuboid_ids: Optional int32 map shaped (num_envs, num_spheres)
+                or (num_envs, num_spheres, 1..2), selecting pairs evaluated by a
+                separate contact constraint; -1 keeps the normal query.
 
         Returns:
             Collision distance/cost tensor (batch, horizon, num_spheres).
@@ -100,7 +101,13 @@ class SphereObstacleCollision(torch.autograd.Function):
                     data_wp, spheres_wp, weight_wp, eta_wp, env_idx_wp,
                     out_cost_wp, out_grad_wp, b, h, n, max_n, use_multi_env_wp,
                     replacement_wp,
-                    wp.uint8(data is scene.cuboids and replacement_cuboid_ids.numel() > 0),
+                    wp.int32(
+                        (
+                            replacement_cuboid_ids.shape[-1]
+                            if replacement_cuboid_ids.ndim == 3 else 1
+                        )
+                        if data is scene.cuboids and replacement_cuboid_ids.numel() > 0 else 0
+                    ),
                 ],
                 stream=stream,
                 device=device,
@@ -171,8 +178,9 @@ class SweptSphereObstacleCollision(torch.autograd.Function):
             env_query_idx: Environment index per batch element.
             use_multi_env: Whether to use batch-specific environments.
             return_loss: If True, backward uses grad_output for scaling.
-            replacement_cuboid_ids: Optional (num_envs, num_spheres) int32 map of
-                pairs evaluated by a separate contact constraint; -1 keeps the normal query.
+            replacement_cuboid_ids: Optional int32 map shaped (num_envs, num_spheres)
+                or (num_envs, num_spheres, 1..2), selecting pairs evaluated by a
+                separate contact constraint; -1 keeps the normal query.
 
         Returns:
             Collision distance/cost tensor (batch, horizon, num_spheres).
@@ -215,7 +223,13 @@ class SweptSphereObstacleCollision(torch.autograd.Function):
                     max_n,
                     use_multi_env_wp,
                     replacement_wp,
-                    wp.uint8(data is scene.cuboids and replacement_cuboid_ids.numel() > 0),
+                    wp.int32(
+                        (
+                            replacement_cuboid_ids.shape[-1]
+                            if replacement_cuboid_ids.ndim == 3 else 1
+                        )
+                        if data is scene.cuboids and replacement_cuboid_ids.numel() > 0 else 0
+                    ),
                 ],
                 stream=stream,
                 device=device,

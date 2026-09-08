@@ -124,17 +124,34 @@ def test_deep_goal_contact_is_rejected(scene: SceneCollision) -> None:
         ContactApproach(deep, scene, 1)
 
 
-def test_combined_endpoint_contacts_are_rejected(scene: SceneCollision) -> None:
-    """Keep unsupported combined pick/place declarations explicit."""
+@pytest.mark.parametrize("heights,accepted", [
+    ([0.049, 0.06, 0.049], True),
+    ([0.049, 0.049, 0.049], False),
+    ([0.049, 0.047, 0.06, 0.049], False),
+    ([0.049, 0.06, 0.049, 0.06, 0.049], False),
+    ([0.049, 0.06, 0.047, 0.049], False),
+    ([0.049, 0.16, 0.049], False),
+])
+@pytest.mark.parametrize("sweep", [False, True])
+def test_combined_endpoint_contacts(
+    scene: SceneCollision, heights: list[float], accepted: bool, sweep: bool
+) -> None:
+    """A transfer must clear the support and may recontact it only at the end."""
     cfg = SceneCollisionCostCfg(
         weight=1.0,
         num_spheres=1,
+        use_sweep=sweep,
         start_contact=StartContact("table", (0,), ((0, 0, 0.049, 0.05),)),
         goal_contact=declaration(),
     )
     cfg.scene_collision_checker = scene
-    with pytest.raises(ValueError, match="start_contact and goal_contact"):
-        SceneCollisionCost(cfg)
+    cost = SceneCollisionCost(cfg)
+    cost.setup_batch_tensors(1, len(heights))
+    result = cost.forward(
+        SimpleNamespace(robot_spheres=trajectory(heights)),
+        trajectory_dt=torch.tensor([0.01], device="cuda"),
+    )
+    assert bool((result == 0).all()) is accepted
 
 
 def test_contact_clearance_preserves_float32_precision(
@@ -147,6 +164,48 @@ def test_contact_clearance_preserves_float32_precision(
     gap = contact.clearance(spheres)
     expected = spheres[..., 2] - spheres[..., 3]
     assert torch.allclose(gap, expected, atol=2e-8, rtol=0)
+
+
+@pytest.mark.parametrize("sweep", [False, True])
+def test_transfer_between_distinct_supports_keeps_other_pairs_checked(sweep: bool) -> None:
+    """One sphere may depart one cuboid and arrive at another in the same query."""
+    world = SceneCollision.from_config(SceneCollisionCfg(scene_model=SceneCfg(cuboid=[
+        Cuboid(name="left", dims=[0.4, 0.4, 0.1], pose=[-0.4, 0, -0.05, 1, 0, 0, 0]),
+        Cuboid(name="right", dims=[0.4, 0.4, 0.1], pose=[0.4, 0, -0.05, 1, 0, 0, 0]),
+    ])))
+    cfg = SceneCollisionCostCfg(
+        weight=1.0, num_spheres=2, use_sweep=sweep,
+        start_contact=StartContact("left", (0,), ((-0.4, 0, 0.049, 0.05),)),
+        goal_contact=GoalContact("right", (0,), ((0.4, 0, 0.049, 0.05),)),
+    )
+    cfg.scene_collision_checker = world
+    cost = SceneCollisionCost(cfg)
+    points = [(-0.4, 0.049), (-0.4, 0.07), (0.0, 0.09), (0.4, 0.07), (0.4, 0.049)]
+    payload = torch.tensor([[[x, 0, z, 0.05]] for x, z in points], device="cuda")[None]
+    gripper = payload.clone()
+    gripper[..., 2] += 0.1
+    spheres = torch.cat((payload, gripper), dim=2)
+    cost.setup_batch_tensors(1, len(points))
+    dt = torch.tensor([0.01], device="cuda")
+    assert cost.forward(SimpleNamespace(robot_spheres=spheres), trajectory_dt=dt).sum() == 0
+    spheres[0, -1, 1, 2] = 0.04
+    assert cost.forward(SimpleNamespace(robot_spheres=spheres), trajectory_dt=dt)[0, -1, 1] > 0
+
+
+def test_transfer_gradient_and_changed_support(scene: SceneCollision) -> None:
+    """An inward move receives a corrective gradient; changed geometry invalidates capture."""
+    from curobo._src.collision.contact_transfer import ContactTransfer
+
+    contact = ContactTransfer(
+        StartContact("table", (0,), ((0, 0, 0.049, 0.05),)), declaration(), scene, 1
+    )
+    spheres = trajectory([0.049, 0.047, 0.06, 0.049]).requires_grad_(True)
+    contact.cost(spheres).sum().backward()
+    assert torch.isfinite(spheres.grad).all()
+    assert spheres.grad[0, 1, 0, 2] < 0
+    assert contact.cost(trajectory([0.049, 0.06, 0.049])).sum() == 0
+    scene.data.cuboids.dims[0, 0, 2] += 0.01
+    assert contact.cost(trajectory([0.049, 0.06, 0.049])).sum() > 0
 
 
 @pytest.mark.parametrize("placement", [False, True])
