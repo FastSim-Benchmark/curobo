@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import torch
 
 # CuRobo
+from curobo._src.cost.cost_axis_hold import AxisHoldCost
 from curobo._src.cost.cost_base import BaseCost
 from curobo._src.cost.cost_cspace_dist import CSpaceDistCost
 from curobo._src.cost.cost_scene_collision import SceneCollisionCost
@@ -177,6 +178,11 @@ class RobotCostManager:
             config.tool_pose_cfg.set_tool_frames(transition_model.robot_model.tool_frames)
             self.register_cost("tool_pose", ToolPoseCost(config.tool_pose_cfg))
 
+        # Independent axis hold
+        if config.axis_hold_cfg is not None:
+            config.axis_hold_cfg.set_tool_frames(robot_model.tool_frames)
+            self.register_cost("axis_hold", AxisHoldCost(config.axis_hold_cfg))
+
         # Start cspace distance
         if config.start_cspace_dist_cfg is not None:
             config.start_cspace_dist_cfg.initialize_from_transition_model(transition_model)
@@ -236,6 +242,13 @@ class RobotCostManager:
                         goal.idxs_link_pose,
                     )
                     cost_collection.add(cost_value, "tool_pose")
+
+        # Independent axis hold
+        if self.has_cost("axis_hold"):
+            with self._stream_context("axis_hold"):
+                cost_collection.add(
+                    self.get_cost("axis_hold").forward(state.tool_poses), "axis_hold"
+                )
 
         # Cspace bounds/limits
         if self.has_cost("cspace"):

@@ -8,6 +8,7 @@ import torch
 import warp as wp
 
 # CuRobo
+from curobo._src.cost.wp_tool_axis import compute_tool_axis_error
 from curobo._src.util.logging import log_and_raise
 from curobo._src.util.warp import get_warp_device_stream, warp_kernel
 
@@ -107,22 +108,22 @@ def compute_position_error(
 
 @wp.func
 def convert_angular_velocity_to_quaternion_rate(angular_velocity: wp.vec3, current_quat: wp.quat):
-    """Convert angular velocity to quaternion rate.
+    """Encode the legacy full-orientation residual as a spatial quaternion gradient.
 
-    This function converts angular velocity to quaternion rate using the quaternion multiplication.
-    The quaternion rate is then scaled by 0.5.
+    The original residual scale is preserved when paired with the spatial FK adjoint.
 
     Args:
-        angular_velocity: The angular velocity. In x, y, z format.
+        angular_velocity: The spatial rotation residual. In x, y, z format.
         current_quat: The current quaternion. In x, y, z, w format.
 
     Returns:
-        quat_rate: The quaternion rate. In x, y, z, w format.
+        quat_rate: The scaled quaternion gradient. In x, y, z, w format.
     """
     omega_quat = wp.quat(angular_velocity[0], angular_velocity[1], angular_velocity[2], 0.0)
 
-    quat_rate = wp.mul(current_quat, omega_quat)
-    # quat_rate = 0.5 * quat_rate
+    # The pose kernel's rotation residual is spatial (world/base frame).
+    # Keep its existing scale while matching the kinematics gradient adjoint.
+    quat_rate = wp.mul(omega_quat, current_quat)
     return quat_rate
 
 
@@ -472,6 +473,7 @@ def create_goalset_pose_distance_kernel_with_constants(
             dtype=wp.float32
         ),  # shape is [num_links, 2] position, rotation
         project_distance_to_goal: wp.array(dtype=wp.uint8),  # shape is [num_links, 1]
+        orientation_axis: wp.array(dtype=wp.vec3),  # zero rows retain full orientation error
         out_distance: wp.array(dtype=wp.float32),  # shape is [batch_size * horizon * num_links, 2]
         out_position_distance: wp.array(
             dtype=wp.float32
@@ -548,6 +550,8 @@ def create_goalset_pose_distance_kernel_with_constants(
         goal_idx = idxs_goal[b_idx]
 
         local_project_distance_to_goal = project_distance_to_goal[link_idx]
+        local_axis = orientation_axis[link_idx]
+        align_axis = wp.dot(local_axis, local_axis) > 0.0
 
         # read current position and quat
         c_position = current_position[b_idx * horizon * num_links + h_idx * num_links + link_idx]
@@ -617,14 +621,23 @@ def create_goalset_pose_distance_kernel_with_constants(
                 convergence_tolerance[0],
             )
 
-            angular_distance, gradient_as_angular_velocity, angle = compute_rotation_error(
-                current_quaternion_in_frame,
-                goal_quaternion_in_frame,
-                rotation_axes_weight,
-                rotation_weight,
-                convergence_tolerance[1],
-                rotation_method,
-            )
+            if align_axis:
+                angular_distance, gradient_as_angular_velocity, angle = compute_tool_axis_error(
+                    current_quaternion_in_frame,
+                    goal_quaternion_in_frame,
+                    local_axis,
+                    rotation_weight * rotation_axes_weight[0] * rotation_axes_weight[0],
+                    convergence_tolerance[1],
+                )
+            else:
+                angular_distance, gradient_as_angular_velocity, angle = compute_rotation_error(
+                    current_quaternion_in_frame,
+                    goal_quaternion_in_frame,
+                    rotation_axes_weight,
+                    rotation_weight,
+                    convergence_tolerance[1],
+                    rotation_method,
+                )
 
             total_distance = position_distance + angular_distance
 
@@ -664,6 +677,16 @@ def create_goalset_pose_distance_kernel_with_constants(
         quaternion_rate_gradient = convert_angular_velocity_to_quaternion_rate(
             best_rotation_gradient, best_current_quaternion
         )
+        if align_axis:
+            # A spatial perturbation obeys dq = 0.5 * (dtheta, 0) * q.
+            # Its adjoint gives the tangent quaternion gradient, not a quaternion rate.
+            spatial_gradient = wp.quat(
+                best_rotation_gradient[0],
+                best_rotation_gradient[1],
+                best_rotation_gradient[2],
+                0.0,
+            )
+            quaternion_rate_gradient = 2.0 * wp.mul(spatial_gradient, best_current_quaternion)
 
         out_distance[2 * (b_idx * horizon * num_links + h_idx * num_links + link_idx)] = (
             scaled_linear_distance
@@ -710,6 +733,7 @@ class ToolPoseDistance(torch.autograd.Function):
         terminal_pose_convergence_tolerance: torch.Tensor,
         non_terminal_pose_convergence_tolerance: torch.Tensor,
         project_distance_to_goal: torch.Tensor,
+        orientation_axis: torch.Tensor,
         out_distance: torch.Tensor,
         out_position_distance: torch.Tensor,
         out_rotation_distance: torch.Tensor,
@@ -742,6 +766,8 @@ class ToolPoseDistance(torch.autograd.Function):
                 tolerance for the position, the second element is the convergence tolerance for the rotation.
             project_distance_to_goal: Shape is (num_links,1). The tensor is accessed using
                 project_distance_to_goal[0]. Only 0 is supported for now.
+            orientation_axis: Tool-local axis per link, shape (num_links, 3). Zero
+                rows select the original orientation cost.
             out_distance: Shape is (b,h,num_links*2). The distance between the current pose and the goal pose.
             out_position_distance: Shape is (b,h,num_links). The position distance between the current pose
                 and the goal pose.
@@ -784,6 +810,8 @@ class ToolPoseDistance(torch.autograd.Function):
             )
         if position_orientation_weight.shape != (2,):
             log_and_raise("position_orientation_weight must have shape (2,)")
+        if orientation_axis.shape != (num_links, 3):
+            log_and_raise("orientation_axis must have shape (num_links, 3)")
 
         # check gradient shape:
         if out_position_gradient.shape != (b, h, num_links, 3):
@@ -819,6 +847,7 @@ class ToolPoseDistance(torch.autograd.Function):
                 wp.from_torch(terminal_pose_convergence_tolerance.view(-1), dtype=wp.float32),
                 wp.from_torch(non_terminal_pose_convergence_tolerance.view(-1), dtype=wp.float32),
                 wp.from_torch(project_distance_to_goal.view(-1), dtype=wp.uint8),
+                wp.from_torch(orientation_axis.view(-1, 3), dtype=wp.vec3),
                 wp.from_torch(out_distance.view(-1), dtype=wp.float32),
                 wp.from_torch(out_position_distance.view(-1), dtype=wp.float32),
                 wp.from_torch(out_rotation_distance.view(-1), dtype=wp.float32),
@@ -849,6 +878,7 @@ class ToolPoseDistance(torch.autograd.Function):
             terminal_pose_convergence_tolerance,
             non_terminal_pose_convergence_tolerance,
             project_distance_to_goal,
+            orientation_axis,
         )
         ctx.save_for_backward(out_position_gradient, out_rotation_gradient)
 
@@ -894,6 +924,7 @@ class ToolPoseDistance(torch.autograd.Function):
         return (
             pos_grad,
             quat_grad,
+            None,
             None,
             None,
             None,

@@ -22,6 +22,7 @@ from curobo._src.util.logging import log_and_raise
 if TYPE_CHECKING:
     # CuRobo
     from curobo._src.cost.cost_tool_pose_cfg import ToolPoseCostCfg
+    from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
 
 
 class ToolPoseCost(BaseCost):
@@ -131,6 +132,7 @@ class ToolPoseCost(BaseCost):
                 self._stacked_tool_pose_criteria.terminal_pose_convergence_tolerance,
                 self._stacked_tool_pose_criteria.non_terminal_pose_convergence_tolerance,
                 self._stacked_tool_pose_criteria.project_distance_to_goal,
+                self._stacked_tool_pose_criteria.orientation_axis,
                 self._out_distance,
                 self._out_position_distance,
                 self._out_rotation_distance,

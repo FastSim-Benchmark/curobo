@@ -12,6 +12,7 @@ Writing Optimization Problems
 
    optimization_problem
    optimization_motion
+   tool_orientation
    custom_cost
    custom_optimization
 

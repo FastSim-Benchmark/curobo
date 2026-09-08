@@ -62,6 +62,9 @@ class RobotCostManagerCfg:
     #: disables pose-based objectives.
     tool_pose_cfg: Optional[ToolPoseCostCfg] = None
 
+    #: Independent, start-referenced per-motion tool-axis constraint.
+    axis_hold_cfg: Optional[ToolPoseCostCfg] = None
+
     def __post_init__(self):
         from .cost_manager_robot import RobotCostManager
 
@@ -79,6 +82,7 @@ class RobotCostManagerCfg:
         attaches the scene collision checker when provided.
         """
         cost_key_map = {
+            "axis_hold_cfg": ToolPoseCostCfg,
             "self_collision_cfg": SelfCollisionCostCfg,
             "cspace_cfg": CSpaceCostCfg,
             "scene_collision_cfg": SceneCollisionCostCfg,

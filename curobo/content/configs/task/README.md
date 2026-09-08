@@ -53,3 +53,7 @@ Configurations for graph-based path planners.
 ## Shared Configurations
 
 - **`metrics_base.yml`**: The root validation configuration defining default weights, collision parameters, and evaluation metrics used across tasks.
+- **`metrics_orientation.yml`**: Opt-in validation of tool orientation over the whole trajectory,
+  including interpolated samples. Pair with `ToolPoseCriteria` to optimize orientation during
+  transport. Use `ToolPoseCriteria.hold_axis` for a cup that may turn freely while
+  staying upright; see the [orientation guide](../../../../docs/guides/tool_orientation.md).

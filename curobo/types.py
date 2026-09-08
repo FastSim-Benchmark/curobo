@@ -32,23 +32,24 @@ Example:
 
 # State types
 # Camera types
+# Pose types
+from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
 from curobo._src.state.state_joint import JointState
 from curobo._src.state.state_robot import RobotState
+from curobo._src.types.axis_hold import AxisHold
 from curobo._src.types.camera import CameraObservation
-from curobo._src.types.lidar import LidarObservation
 
 # Content path
 from curobo._src.types.content_path import ContentPath
 
 # Tensor configuration
 from curobo._src.types.device_cfg import DeviceCfg
-
-# Pose types
-from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
+from curobo._src.types.lidar import LidarObservation
 from curobo._src.types.pose import Pose
 from curobo._src.types.tool_pose import GoalToolPose, ToolPose
 
 __all__ = [
+    "AxisHold",
     "JointState",
     "RobotState",
     "Pose",

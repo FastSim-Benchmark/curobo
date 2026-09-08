@@ -4,11 +4,13 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Dict, List, Optional, Union
 
 import torch
 
 from curobo._src.collision.attachment_manager import AttachmentManager
+from curobo._src.cost.cost_tool_pose_cfg import ToolPoseCostCfg
 from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
 from curobo._src.geom.collision.collision_scene import create_scene_collision
 from curobo._src.geom.types import SceneCfg
@@ -25,6 +27,7 @@ from curobo._src.solver.solver_trajopt import TrajOptSolver
 from curobo._src.solver.solver_trajopt_result import TrajOptSolverResult
 from curobo._src.state.state_joint import JointState
 from curobo._src.state.state_joint_trajectory_ops import get_joint_state_at_horizon_index
+from curobo._src.types.axis_hold import AxisHold
 from curobo._src.types.pose import Pose
 from curobo._src.types.tool_pose import GoalToolPose, ToolPose
 from curobo._src.util.logging import log_and_raise
@@ -56,6 +59,19 @@ class MotionPlanner:
         self._initialize_components()
 
     def _initialize_components(self):
+        # Reserve the optional parameter's buffers before any CUDA graph capture.
+        # Independent costs preserve the ordinary pose/joint endpoint semantics.
+        for solver_cfg in (self.config.ik_solver_config, self.config.trajopt_solver_config):
+            core = solver_cfg.core_cfg
+            for rollout in [core.metrics_rollout_config, *core.optimizer_rollout_configs]:
+                for name, weight in (("cost_cfg", 500.0), ("constraint_cfg", 1.0)):
+                    manager = getattr(rollout, name)
+                    if manager is None:
+                        manager = rollout.cost_manager_config_instance_type()
+                        setattr(rollout, name, manager)
+                    manager.axis_hold_cfg = ToolPoseCostCfg(
+                        weight=[0.0, weight], device_cfg=self.device_cfg,
+                    )
         if self.config.scene_collision_cfg is not None:
             self.scene_collision_checker = create_scene_collision(
                 self.config.scene_collision_cfg
@@ -107,6 +123,37 @@ class MotionPlanner:
         return self.trajopt_solver.core.attachment_manager
 
     # -- Properties --
+
+    @contextmanager
+    def _hold_axis_scope(self, hold_axis, current_state):
+        holds = {} if hold_axis is None else dict(hold_axis)
+        if any(frame not in self.tool_frames for frame in holds):
+            raise ValueError("hold_axis keys must name configured tool frames")
+        if any(not isinstance(hold, AxisHold) for hold in holds.values()):
+            raise TypeError("hold_axis values must be AxisHold declarations")
+        if not holds:
+            yield
+            return
+        if current_state.shape[0] != 1:
+            raise ValueError("per-motion hold_axis requires one planning problem")
+        starting = self.compute_kinematics(current_state).tool_poses
+        costs = []
+        for solver in (self.ik_solver, self.trajopt_solver):
+            rollouts = [
+                *solver.core.get_all_rollout_instances(),
+                *solver.core.additional_metrics_rollouts.values(),
+            ]
+            for rollout in rollouts:
+                for cost in rollout.get_cost_component_by_name("axis_hold"):
+                    if cost is not None and cost not in costs:
+                        costs.append(cost)
+        try:
+            for cost in costs:
+                cost.set_hold(holds, starting)
+            yield
+        finally:
+            for cost in costs:
+                cost.set_hold({}, None)
 
     @property
     def joint_names(self) -> List[str]:
@@ -206,6 +253,27 @@ class MotionPlanner:
     # -- Planning --
 
     def plan_pose(
+        self,
+        goal_tool_poses: GoalToolPose,
+        current_state: JointState,
+        use_implicit_goal: bool = True,
+        max_attempts: int = 5,
+        enable_graph_attempt: int = 1,
+        *,
+        hold_axis: Optional[Dict[str, AxisHold]] = None,
+    ) -> Optional[TrajOptSolverResult]:
+        """Plan to poses with an optional start-referenced axis hold per tool.
+
+        The parameter lasts for this call only. Pose endpoints and collision
+        policies retain their usual meaning; incompatible goals are infeasible.
+        """
+        with self._hold_axis_scope(hold_axis, current_state):
+            return self._plan_pose(
+                goal_tool_poses, current_state, use_implicit_goal,
+                max_attempts, enable_graph_attempt,
+            )
+
+    def _plan_pose(
         self,
         goal_tool_poses: GoalToolPose,
         current_state: JointState,
@@ -324,6 +392,25 @@ class MotionPlanner:
         return trajopt_result
 
     def plan_cspace(
+        self,
+        goal_state: JointState,
+        current_state: JointState,
+        max_attempts: int = 5,
+        enable_graph_attempt: int = 1,
+        *,
+        hold_axis: Optional[Dict[str, AxisHold]] = None,
+    ) -> Optional[TrajOptSolverResult]:
+        """Plan to exact joints, optionally holding a tool axis from the start.
+
+        An incompatible joint endpoint fails instead of being retargeted.
+        The constraint is cleared even when planning raises an exception.
+        """
+        with self._hold_axis_scope(hold_axis, current_state):
+            return self._plan_cspace(
+                goal_state, current_state, max_attempts, enable_graph_attempt,
+            )
+
+    def _plan_cspace(
         self,
         goal_state: JointState,
         current_state: JointState,

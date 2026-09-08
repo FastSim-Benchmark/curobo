@@ -23,14 +23,14 @@ from curobo._src.util.warp import get_warp_device_stream, init_warp
 def quaternion_rate_to_axis_angle_rate(
     quaternion_rate: torch.Tensor, current_quaternion: torch.Tensor
 ) -> torch.Tensor:
-    """Convert quaternion rate/gradient to angular velocity (axis-angle rate).
+    """Map a quaternion gradient to a spatial rotation gradient for IK.
 
     Args:
-        quaternion_rate: Quaternion gradient/rate tensor (..., 4) in wxyz format
+        quaternion_rate: Quaternion gradient tensor (..., 4) in wxyz format
         current_quaternion: Current quaternion tensor (..., 4) in wxyz format
 
     Returns:
-        Angular velocity tensor (..., 3) in xyz format
+        World/base-frame rotation gradient (..., 3) in xyz format
     """
     # Ensure quaternions are normalized
     current_quaternion = current_quaternion / torch.norm(current_quaternion, dim=-1, keepdim=True)
@@ -47,11 +47,10 @@ def quaternion_rate_to_axis_angle_rate(
     dqy = quaternion_rate[..., 2]
     dqz = quaternion_rate[..., 3]
 
-    # Compute angular velocity using the Jacobian transpose
-    # This implements: ω = 2 * Im(q* ⊗ dq/dt)
-    omega_x = 0.5 * (-qx * dqw + qw * dqx + qz * dqy - qy * dqz)
-    omega_y = 0.5 * (-qy * dqw - qz * dqx + qw * dqy + qx * dqz)
-    omega_z = 0.5 * (-qz * dqw + qy * dqx - qx * dqy + qw * dqz)
+    # Adjoint of dq = 0.5 * (dtheta_world, 0) * q, matching FK backward.
+    omega_x = 0.5 * (-qx * dqw + qw * dqx - qz * dqy + qy * dqz)
+    omega_y = 0.5 * (-qy * dqw + qz * dqx + qw * dqy - qx * dqz)
+    omega_z = 0.5 * (-qz * dqw - qy * dqx + qx * dqy + qw * dqz)
 
     # Stack into output tensor
     omega = torch.stack([omega_x, omega_y, omega_z], dim=-1)

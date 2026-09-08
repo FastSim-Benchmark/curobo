@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 # Standard Library
+import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
 
@@ -42,6 +43,12 @@ class ToolPoseCriteria:
     project_distance_to_goal: Union[torch.Tensor, bool] = False
 
     device_cfg: DeviceCfg = DeviceCfg()
+
+    #: Optional object axis expressed in this tool's local frame. Aligns
+    #: R(current) @ axis with R(goal) @ axis while leaving twist free. None
+    #: retains full orientation error. A supplied axis is normalized. Rotation
+    #: factors must be equal and nonnegative within each terminal/nonterminal set.
+    orientation_axis: Optional[Union[torch.Tensor, List[float]]] = None
 
     def __post_init__(self):
         if self.terminal_pose_axes_weight_factor is None:
@@ -100,6 +107,25 @@ class ToolPoseCriteria:
         self.non_terminal_pose_convergence_tolerance = self.device_cfg.to_device(
             self.non_terminal_pose_convergence_tolerance
         )
+        if self.orientation_axis is not None:
+            axis = self.device_cfg.to_device(self.orientation_axis)
+            if axis.shape != (3,) or not bool(torch.isfinite(axis).all()):
+                log_and_raise("orientation_axis must be a finite vector of shape (3,)")
+            norm = axis.norm()
+            if not bool(torch.isfinite(norm)) or float(norm) <= 0.0:
+                log_and_raise("orientation_axis must have a finite, nonzero norm")
+            self.orientation_axis = axis / norm
+            for factors in (
+                self.terminal_pose_axes_weight_factor,
+                self.non_terminal_pose_axes_weight_factor,
+            ):
+                rotation = factors[3:]
+                if (
+                    not bool(torch.isfinite(rotation).all())
+                    or bool((rotation < 0).any())
+                    or not bool((rotation == rotation[0]).all())
+                ):
+                    log_and_raise("Axis alignment requires equal nonnegative rotation weights")
 
     def clone(self):
         return ToolPoseCriteria(
@@ -109,6 +135,9 @@ class ToolPoseCriteria:
             non_terminal_pose_convergence_tolerance=self.non_terminal_pose_convergence_tolerance.clone(),
             project_distance_to_goal=self.project_distance_to_goal.clone(),
             device_cfg=self.device_cfg,
+            orientation_axis=(
+                self.orientation_axis.clone() if self.orientation_axis is not None else None
+            ),
         )
 
     def copy_(self, other: ToolPoseCriteria):
@@ -129,6 +158,41 @@ class ToolPoseCriteria:
             )
         if other.project_distance_to_goal is not None:
             self.project_distance_to_goal[:] = other.project_distance_to_goal
+        if other.orientation_axis is None:
+            self.orientation_axis = None
+        elif self.orientation_axis is None:
+            self.orientation_axis = other.orientation_axis.clone()
+        else:
+            self.orientation_axis.copy_(other.orientation_axis)
+
+    @staticmethod
+    def hold_axis(
+        axis: Union[torch.Tensor, List[float]],
+        tolerance: float = 0.01,
+        device_cfg: DeviceCfg = DeviceCfg(),
+    ) -> ToolPoseCriteria:
+        """Hold a tool-local axis along its goal direction, leaving twist and transport free.
+
+        Args:
+            axis: Nonzero object up vector expressed in the tool frame, shape (3,).
+            tolerance: Positive tilt tolerance in radians, smaller than pi. With
+                unit validation weight this is the geometric axis-angle threshold.
+            device_cfg: Device used by the planner.
+
+        Returns:
+            Criteria retaining the terminal XYZ goal and constraining the selected
+            axis at every step. Goal quaternions specify the desired axis direction.
+        """
+        if not math.isfinite(tolerance) or not 0.0 < tolerance < math.pi:
+            log_and_raise("Axis tolerance must be finite and between 0 and pi radians")
+        return ToolPoseCriteria(
+            terminal_pose_axes_weight_factor=[1.0] * 6,
+            non_terminal_pose_axes_weight_factor=[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            terminal_pose_convergence_tolerance=[0.0, tolerance],
+            non_terminal_pose_convergence_tolerance=[0.0, tolerance],
+            orientation_axis=axis,
+            device_cfg=device_cfg,
+        )
 
     @staticmethod
     def track_position(xyz: List[float] = [1.0, 1.0, 1.0]):
@@ -247,6 +311,9 @@ class StackedToolPoseCriteria:
 
     _tool_pose_criteria: Optional[Dict[str, ToolPoseCriteria]] = None
 
+    #: Tool-local axes, shape (num_links, 3). Zero rows retain full orientation error.
+    orientation_axis: Optional[torch.Tensor] = None
+
     @staticmethod
     def from_tool_pose_criteria(tool_pose_criteria: Dict[str, ToolPoseCriteria]):
         tool_frames = list(tool_pose_criteria.keys())
@@ -283,10 +350,22 @@ class StackedToolPoseCriteria:
             project_distance_to_goal=project_distance_to_goal,
             device_cfg=tool_pose_criteria[list(tool_pose_criteria.keys())[0]].device_cfg,
             _tool_pose_criteria=tool_pose_criteria,
+            orientation_axis=torch.stack([
+                tool_pose_criteria[name].orientation_axis
+                if tool_pose_criteria[name].orientation_axis is not None
+                else torch.zeros_like(
+                    tool_pose_criteria[name].terminal_pose_axes_weight_factor[:3]
+                )
+                for name in tool_frames
+            ]),
         )
 
     def __post_init__(self):
         num_links = len(self.tool_frames)
+        if self.orientation_axis is None:
+            self.orientation_axis = torch.zeros((num_links, 3), **self.device_cfg.as_torch_dict())
+        if self.orientation_axis.shape != (num_links, 3):
+            log_and_raise("orientation_axis must have shape (num_links, 3)")
         # check shapes of all tensors:
         if self.terminal_pose_axes_weight_factor.shape != (num_links, 6):
             log_and_raise(
@@ -319,6 +398,7 @@ class StackedToolPoseCriteria:
             project_distance_to_goal=self.project_distance_to_goal.clone(),
             device_cfg=self.device_cfg,
             _tool_pose_criteria=self._tool_pose_criteria,
+            orientation_axis=self.orientation_axis.clone(),
         )
 
     def update_tool_pose_criteria(self, tool_pose_criteria: Dict[str, ToolPoseCriteria]):
@@ -330,6 +410,10 @@ class StackedToolPoseCriteria:
 
     def _update_criteria_in_stack(self, link_name: str, tool_pose_criteria: ToolPoseCriteria):
         link_idx = self.tool_frames.index(link_name)
+        if tool_pose_criteria.orientation_axis is None:
+            self.orientation_axis[link_idx].zero_()
+        else:
+            self.orientation_axis[link_idx].copy_(tool_pose_criteria.orientation_axis)
         if tool_pose_criteria.terminal_pose_axes_weight_factor is not None:
             self.terminal_pose_axes_weight_factor[link_idx, :] = (
                 tool_pose_criteria.terminal_pose_axes_weight_factor
