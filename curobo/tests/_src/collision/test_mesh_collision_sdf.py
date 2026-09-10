@@ -198,3 +198,49 @@ def test_open_mesh_declared_solid_fails_scene_admission(cuda_device_cfg):
                 cache={"mesh": 1},
             )
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("kind", ["cuboid", "mesh"])
+def test_incremental_world_updates_change_collision_queries(cuda_device_cfg, kind):
+    """Replacement/removal/reinsertion changes queries in resident scene storage."""
+    def obstacle(edge):
+        box = Cuboid(name="target", dims=[edge] * 3, pose=[0, 0, 0, 1, 0, 0, 0])
+        if kind == "cuboid":
+            return box
+        geometry = box.get_trimesh_mesh()
+        return Mesh(name=box.name, pose=box.pose, vertices=geometry.vertices.tolist(),
+                    faces=geometry.faces.tolist())
+
+    checker = SceneCollision.from_config(SceneCollisionCfg(
+        device_cfg=cuda_device_cfg, cache={"cuboid": 2, "mesh": 2},
+    ))
+    data = checker.data.cuboids if kind == "cuboid" else checker.data.meshes
+    pointer = data.inv_pose.data_ptr()
+    spheres = cuda_device_cfg.to_device([[[[0.08, 0, 0, 0.05]]]])
+    buffer = CollisionBuffer.from_shape(spheres.shape, cuda_device_cfg)
+
+    def cost():
+        return checker.get_sphere_distance_raw(
+            spheres, buffer, cuda_device_cfg.to_device([1.0]),
+            cuda_device_cfg.to_device([0.01]),
+        ).item()
+
+    initial = obstacle(0.05)
+    checker.apply_obstacle_updates([initial], [])
+    assert checker.scene_model.get_obstacle("target") is initial
+    assert cost() > 0
+    replacement = obstacle(0.01)
+    checker.apply_obstacle_updates([replacement], [])
+    assert checker.scene_model.get_obstacle("target") is replacement
+    assert getattr(checker.scene_model, kind) == [replacement]
+    assert cost() == 0
+    checker.apply_obstacle_updates([obstacle(0.05)], [])
+    assert cost() > 0
+    checker.apply_obstacle_updates([], ["target"])
+    assert checker.scene_model.get_obstacle("target") is None
+    assert not getattr(checker.scene_model, kind)
+    assert cost() == 0
+    checker.apply_obstacle_updates([obstacle(0.05)], [])
+    assert cost() > 0
+    assert data.inv_pose.data_ptr() == pointer

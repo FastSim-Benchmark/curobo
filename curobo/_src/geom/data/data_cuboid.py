@@ -277,6 +277,26 @@ class CuboidData:
             env_idx=env_idx,
         )
 
+    def remove(self, name: str, env_idx: int = 0) -> None:
+        """Remove one cuboid and compact the last active slot."""
+        idx = self.get_idx(name, env_idx)
+        last = int(self.count[env_idx].item()) - 1
+        for buffer in (self.dims, self.inv_pose, self.enable):
+            if idx != last:
+                buffer[env_idx, idx].copy_(buffer[env_idx, last])
+        self.names[env_idx][idx] = self.names[env_idx][last]
+        self.names[env_idx][last] = None
+        self.enable[env_idx, last] = 0
+        self.count[env_idx] = last
+
+    def replace(self, cuboid: Cuboid, env_idx: int = 0) -> None:
+        """Replace one cuboid while preserving the allocated tensor layout."""
+        idx = self.get_idx(cuboid.name, env_idx)
+        tensors = batch_tensor_cube([cuboid.pose], [cuboid.dims], self.device_cfg)
+        self.dims[env_idx, idx, :3] = tensors[0][0]
+        self.inv_pose[env_idx, idx, :7] = tensors[1][0]
+        self.enable[env_idx, idx] = 1
+
     def add_from_raw(
         self,
         name: str,

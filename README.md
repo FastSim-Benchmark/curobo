@@ -22,6 +22,19 @@ Key capabilities:
 - **Scalable whole-body computation** including topology-aware kinematics, differentiable inverse dynamics, and map-reduce self-collision for high-DoF robots
 - **Collision-free motion generation** combining IK, geometric planning, and trajectory optimization.
 
+## FastSim fork: incremental collision worlds
+
+`SceneCollision.apply_obstacle_updates(obstacles, removed, env_idx=0)` updates
+only named mesh/cuboid obstacles within preallocated capacities. Existing names
+replace geometry, new names add slots, and removed names recycle slots. Unmentioned
+meshes retain their Warp acceleration structures and device buffers retain their
+addresses. Use the existing pose-update API when geometry is unchanged.
+
+The method validates names, types and capacity before mutation. Replacing a mesh
+name shared with another environment is rejected. A device or geometry-load error
+during mutation can leave a partial update: discard the owning planner on such an
+error before further planning. This API does not promise transactional rollback.
+
 ## Citation
 
 If you found this work useful, please cite cuRoboV2,

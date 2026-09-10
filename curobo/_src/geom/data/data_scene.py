@@ -311,6 +311,63 @@ class SceneData:
         else:
             log_and_raise(f"Unsupported obstacle type: {type(obstacle)}")
 
+    def apply_obstacle_updates(
+        self, obstacles: List[Obstacle], removed: List[str], env_idx: int = 0
+    ) -> None:
+        """Apply a bounded cuboid/mesh delta without replacing scene buffers.
+
+        Validate names, supported types and final capacities before mutation.
+        Callers must serialize updates with collision queries and discard a
+        solver after a device or geometry-loading failure during mutation.
+        """
+        if type(env_idx) is not int or not 0 <= env_idx < self.num_envs:
+            raise ValueError("environment index is out of bounds")
+        names = [obstacle.name for obstacle in obstacles]
+        if len(names) != len(set(names)) or len(removed) != len(set(removed)):
+            raise ValueError("obstacle updates require unique names")
+        if set(names) & set(removed):
+            raise ValueError("upsert and removal names must be disjoint")
+        for name in removed:
+            data = self._get_obstacle_data(name, env_idx)
+            if data is None or data is self.voxels:
+                raise ValueError(f"removal requires an existing cuboid or mesh: {name}")
+        targets = []
+        for obstacle in obstacles:
+            data = (
+                self.cuboids if isinstance(obstacle, Cuboid)
+                else self.meshes if isinstance(obstacle, Mesh) else None
+            )
+            if data is None:
+                raise ValueError("update requires an allocated cuboid or mesh cache")
+            previous = self._get_obstacle_data(obstacle.name, env_idx)
+            if previous is not None and previous is self.voxels:
+                raise ValueError("update cannot replace a voxel obstacle")
+            if data is self.meshes and any(
+                obstacle.name in environment_names
+                for index, environment_names in enumerate(data.names) if index != env_idx
+            ):
+                raise ValueError("cannot replace a mesh name shared with another environment")
+            targets.append(data)
+        for data in (self.cuboids, self.meshes):
+            if data is None:
+                continue
+            final = set(data.get_names(env_idx)) - set(removed) - set(names)
+            final.update(name for name, target in zip(names, targets) if target is data)
+            if len(final) > data.max_n:
+                raise ValueError("obstacle updates exceed the prepared collision capacity")
+        # Remove old types before inserting replacements of a different type.
+        for name in removed:
+            self._get_obstacle_data(name, env_idx).remove(name, env_idx)
+        for obstacle, target in zip(obstacles, targets):
+            previous = self._get_obstacle_data(obstacle.name, env_idx)
+            if previous is not None and previous is not target:
+                previous.remove(obstacle.name, env_idx)
+        for obstacle, target in zip(obstacles, targets):
+            if target.has_name(obstacle.name, env_idx):
+                target.replace(obstacle, env_idx)
+            else:
+                target.add(obstacle, env_idx)
+
     def update_obstacle_pose(
         self,
         name: str,

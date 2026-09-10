@@ -412,6 +412,39 @@ class MeshData:
 
         return current_count
 
+    def remove(self, name: str, env_idx: int = 0) -> None:
+        """Remove one obstacle, compacting only the last active slot."""
+        idx = self.get_idx(name, env_idx)
+        last = int(self.count[env_idx].item()) - 1
+        for buffer in (
+            self.mesh_ids, self.dims, self.inv_pose, self.enable, self.use_signed_distance
+        ):
+            if idx != last:
+                buffer[env_idx, idx].copy_(buffer[env_idx, last])
+        self.names[env_idx][idx] = self.names[env_idx][last]
+        self.names[env_idx][last] = None
+        self.enable[env_idx, last] = 0
+        self.use_signed_distance[env_idx, last] = 0
+        self.count[env_idx] = last
+        if not any(name in names for names in self.names):
+            self.wp_cache.pop(name, None)
+
+    def replace(self, mesh: Mesh, env_idx: int = 0) -> None:
+        """Replace one named mesh without changing collision tensor addresses."""
+        idx = self.get_idx(mesh.name, env_idx)
+        if any(mesh.name in names for index, names in enumerate(self.names) if index != env_idx):
+            raise ValueError("cannot replace a mesh name shared with another environment")
+        data = self._load_mesh_to_warp(mesh)
+        inverse = Pose.from_list(mesh.pose, self.device_cfg).inverse()
+        lower, upper = data.get_bounds()
+        signed = int(self._uses_signed_distance(mesh, data))
+        self.wp_cache[mesh.name] = data
+        self.mesh_ids[env_idx, idx] = data.mesh_id
+        self.dims[env_idx, idx, :3] = upper - lower
+        self.inv_pose[env_idx, idx, :7] = inverse.get_pose_vector()
+        self.use_signed_distance[env_idx, idx] = signed
+        self.enable[env_idx, idx] = 1
+
     # -------------------------------------------------------------------------
     # Update Methods
     # -------------------------------------------------------------------------

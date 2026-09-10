@@ -25,7 +25,7 @@ import torch
 from curobo._src.geom.collision.buffer_collision import CollisionBuffer
 from curobo._src.geom.collision.checker_collision import CollisionChecker
 from curobo._src.geom.data.data_scene import SceneData
-from curobo._src.geom.types import Cuboid, SceneCfg
+from curobo._src.geom.types import Cuboid, Obstacle, SceneCfg
 from curobo._src.types.device_cfg import DeviceCfg
 from curobo._src.types.pose import Pose
 
@@ -386,6 +386,37 @@ class SceneCollision:
         """
         self.data.load_from_scene_cfg(scene_model, env_idx)
         self.scene_model = scene_model
+
+    def apply_obstacle_updates(
+        self, obstacles: List[Obstacle], removed: List[str], env_idx: int = 0
+    ) -> None:
+        """Apply explicit mesh/cuboid upserts and removals in prepared storage.
+
+        Unmentioned obstacles and their acceleration structures remain intact.
+        Queries must not overlap updates. A runtime/device failure requires
+        discarding the owning solver; invalid names/capacities fail before writes.
+        """
+        self.data.apply_obstacle_updates(obstacles, removed, env_idx)
+        # Attachment lookup reads this CPU reference. Keep its typed lists and
+        # flattened object view consistent without copying unchanged geometry.
+        if isinstance(self.scene_model, list):
+            models = list(self.scene_model)
+        elif self.scene_model is None:
+            models = [SceneCfg() for _ in range(self.data.num_envs)]
+        else:
+            models = [self.scene_model] * self.data.num_envs
+        previous = models[env_idx]
+        changed = set(removed) | {obstacle.name for obstacle in obstacles}
+        updated = SceneCfg(**{
+            kind: [item for item in (getattr(previous, kind) or []) if item.name not in changed]
+            for kind in ("sphere", "cuboid", "capsule", "cylinder", "mesh", "voxel")
+        })
+        for obstacle in obstacles:
+            updated.add_obstacle(obstacle)
+        models[env_idx] = updated
+        self.scene_model = (
+            models if isinstance(self.scene_model, list) or self.data.num_envs > 1 else updated
+        )
 
     def update_obstacle_pose(
         self,
