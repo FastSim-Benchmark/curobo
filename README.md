@@ -63,3 +63,11 @@ The example robot assets bundled in this repository are provided under their res
 ## Third-Party Software
 
 This project will download and install additional third-party open source software projects. Review the license terms of these open source projects before use.
+
+## YAML configuration compatibility
+
+Configuration loading rejects Python-specific YAML tags. Writers emit portable
+YAML data, converting supported robot tensors and parameter objects to plain
+values. `RobotCfg.write_config` preserves the runtime robot object and requires
+its original `generator_config` to produce a reloadable configuration. Convert
+legacy Python-tagged configuration files to plain YAML before loading them.
