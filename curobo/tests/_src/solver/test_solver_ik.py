@@ -219,6 +219,13 @@ class TestIKSolverSolvePose:
         result = ik_solver.solve_pose(goal_tool_poses=goal_tool_poses, return_seeds=4)
         assert result.solution.shape[0] == 1
         assert result.solution.shape[1] == 4
+        # Selecting a seed must retain its complete geometry, not select a sphere.
+        actual = result.solution_state.robot_spheres
+        expected = ik_solver.kinematics.compute_kinematics(
+            result.solution_state.joint_state
+        ).robot_spheres
+        assert actual.shape == (1, 4, ik_solver.kinematics.total_spheres, 4)
+        torch.testing.assert_close(actual, expected)
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
     def test_solve_pose_with_tool_pose_input(self, ik_solver, cuda_device_cfg):

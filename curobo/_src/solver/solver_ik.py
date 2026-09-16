@@ -520,6 +520,7 @@ class IKSolver:
         )
         all_state = metrics_result.state
         num_links = len(all_state.cuda_robot_model_state.tool_poses.tool_frames)
+        num_spheres = all_state.cuda_robot_model_state.robot_spheres.shape[-2]
         solution_state = RobotState(
             cuda_robot_model_state=KinematicsState(
                 tool_poses=ToolPose(
@@ -531,9 +532,9 @@ class IKSolver:
                         -1, num_links, 4
                     )[topk_abs_idx.view(-1)].view(batch_size, return_seeds, num_links, 4),
                 ),
-                robot_spheres=all_state.cuda_robot_model_state.robot_spheres.view(-1, 4)[
+                robot_spheres=all_state.cuda_robot_model_state.robot_spheres.flatten(0, 1)[
                     topk_abs_idx.view(-1)
-                ].view(batch_size, return_seeds, -1, 4),
+                ].view(batch_size, return_seeds, num_spheres, 4),
                 robot_com=all_state.cuda_robot_model_state.robot_com.view(-1, 4)[
                     topk_abs_idx.view(-1)
                 ].view(batch_size, return_seeds, -1, 4),
