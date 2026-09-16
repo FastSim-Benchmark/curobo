@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Union
 import torch
 
 from curobo._src.collision.attachment_manager import AttachmentManager
+from curobo._src.cost.cost_base_cfg import BaseCostCfg
 from curobo._src.cost.cost_tool_pose_cfg import ToolPoseCostCfg
 from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
 from curobo._src.geom.collision.collision_scene import create_scene_collision
@@ -69,6 +70,7 @@ class MotionPlanner:
                     if manager is None:
                         manager = rollout.cost_manager_config_instance_type()
                         setattr(rollout, name, manager)
+                    manager.posture_cfg = BaseCostCfg(weight=weight, device_cfg=self.device_cfg)
                     manager.axis_hold_cfg = ToolPoseCostCfg(
                         weight=[0.0, weight], device_cfg=self.device_cfg,
                     )
@@ -413,6 +415,30 @@ class MotionPlanner:
                 break
 
         return trajopt_result
+
+    def plan_posture(
+        self,
+        goal_states: JointState,
+        current_state: JointState,
+        *,
+        free_joints: tuple[str, ...] = (),
+        held_joints: tuple[str, ...] = (),
+        tolerance: float = 0.01,
+        max_attempts: int = 5,
+        hold_axis: Optional[Dict[str, AxisHold]] = None,
+        allow_boundary_collision: str = "none",
+        max_initial_penetration: float = 0.002,
+        contact_links: tuple[str, ...] | None = None,
+    ) -> Optional[TrajOptSolverResult]:
+        """Plan to a partial joint goal set; free and held coordinates are explicit."""
+        from curobo._src.motion.motion_posture import plan_posture
+        return plan_posture(
+            self, goal_states, current_state,
+            free_joints=free_joints, held_joints=held_joints,
+            tolerance=tolerance, max_attempts=max_attempts,
+            hold_axis=hold_axis, allow_boundary_collision=allow_boundary_collision,
+            max_initial_penetration=max_initial_penetration, contact_links=contact_links,
+        )
 
     def plan_cspace(
         self,

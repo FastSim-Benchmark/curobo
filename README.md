@@ -98,3 +98,25 @@ YAML data, converting supported robot tensors and parameter objects to plain
 values. `RobotCfg.write_config` preserves the runtime robot object and requires
 its original `generator_config` to produce a reloadable configuration. Convert
 legacy Python-tagged configuration files to plain YAML before loading them.
+
+## Partial joint posture goal sets
+
+`MotionPlanner.plan_posture(goal_states, current_state, free_joints=(),
+held_joints=(), tolerance=0.01, max_attempts=5, hold_axis=None,
+allow_boundary_collision="none", max_initial_penetration=0.002, contact_links=None)` solves one joint goal set (1–256 rows).
+All terminal coordinates except explicitly free joints must match one member;
+held joints additionally preserve the current value throughout the trajectory.
+They use equal position bounds during the call, restored on every exit, and a
+separate 1e-5 numerical acceptance threshold independent of terminal tolerance.
+The caller must resolve omitted task variables into held joints. The planner
+uses the native IK/TrajOpt pipeline with a joint goal-set residual; Cartesian
+tracking is disabled for the call and restored afterwards. Axis hold, physical
+limits and collision checks remain active. Start contact supports up to eight static
+cuboids or meshes, with a configurable initial sphere-proxy penetration bound in
+metres. Captured contact cannot deepen, must clear the support by the endpoint,
+and cannot recur after release. Other pairs retain ordinary collision checks;
+other contact policies are rejected. Mesh queries reuse the current scene BVH.
+The interpolated result is also checked against the declared joint tolerances.
+
+`contact_links` restricts initial-contact capture to spheres on named robot links;
+`None` considers all active spheres. Collision checks for other pairs stay active.

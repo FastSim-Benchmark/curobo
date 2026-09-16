@@ -17,6 +17,7 @@ import torch
 from curobo._src.cost.cost_axis_hold import AxisHoldCost
 from curobo._src.cost.cost_base import BaseCost
 from curobo._src.cost.cost_cspace_dist import CSpaceDistCost
+from curobo._src.cost.cost_posture import PostureCost
 from curobo._src.cost.cost_scene_collision import SceneCollisionCost
 from curobo._src.cost.cost_self_collision import SelfCollisionCost
 from curobo._src.cost.cost_tool_pose import ToolPoseCost
@@ -173,6 +174,11 @@ class RobotCostManager:
             config.cspace_cfg.initialize_from_transition_model(transition_model)
             self.register_cost("cspace", config.cspace_cfg.class_type(config.cspace_cfg))
 
+        if config.posture_cfg is not None:
+            self.register_cost(
+                "posture", PostureCost(config.posture_cfg, transition_model.action_dim)
+            )
+
         # Tool pose tracking
         if config.tool_pose_cfg is not None:
             config.tool_pose_cfg.set_tool_frames(transition_model.robot_model.tool_frames)
@@ -242,6 +248,12 @@ class RobotCostManager:
                         goal.idxs_link_pose,
                     )
                     cost_collection.add(cost_value, "tool_pose")
+
+        if self.has_cost("posture"):
+            with self._stream_context("posture"):
+                cost_collection.add(
+                    self.get_cost("posture").forward(state.joint_state.position), "posture"
+                )
 
         # Independent axis hold
         if self.has_cost("axis_hold"):

@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, Optional
 
+from curobo._src.cost.cost_base_cfg import BaseCostCfg
+
 # CuRobo
 from curobo._src.cost.cost_cspace_cfg import CSpaceCostCfg
 from curobo._src.cost.cost_cspace_dist_cfg import CSpaceDistCostCfg
@@ -64,6 +66,7 @@ class RobotCostManagerCfg:
 
     #: Independent, start-referenced per-motion tool-axis constraint.
     axis_hold_cfg: Optional[ToolPoseCostCfg] = None
+    posture_cfg: Optional[BaseCostCfg] = None
 
     def __post_init__(self):
         from .cost_manager_robot import RobotCostManager
@@ -83,6 +86,7 @@ class RobotCostManagerCfg:
         """
         cost_key_map = {
             "axis_hold_cfg": ToolPoseCostCfg,
+            "posture_cfg": BaseCostCfg,
             "self_collision_cfg": SelfCollisionCostCfg,
             "cspace_cfg": CSpaceCostCfg,
             "scene_collision_cfg": SceneCollisionCostCfg,

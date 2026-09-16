@@ -85,7 +85,7 @@ class CollisionChecker:
             or replacement_cuboid_ids.shape[:2] != (scene.num_envs, query_sphere.shape[-2])
             or (
                 replacement_cuboid_ids.ndim == 3
-                and not 1 <= replacement_cuboid_ids.shape[-1] <= 2
+                and not 1 <= replacement_cuboid_ids.shape[-1] <= 8
             )
             or replacement_cuboid_ids.dtype != torch.int32
             or replacement_cuboid_ids.device != query_sphere.device
@@ -93,7 +93,7 @@ class CollisionChecker:
         ):
             log_and_raise(
                 "replacement_cuboid_ids must be contiguous int32 "
-                "(num_envs, num_spheres[, 1 or 2]) "
+                "(num_envs, num_spheres[, 1..8]) "
                 "on the query sphere device"
             )
 
@@ -107,6 +107,7 @@ class CollisionChecker:
         env_query_idx: Optional[torch.Tensor] = None,
         return_loss: bool = False,
         replacement_cuboid_ids: Optional[torch.Tensor] = None,
+        replacement_mesh_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute collision distance between query spheres and scene obstacles.
 
@@ -121,9 +122,10 @@ class CollisionChecker:
             activation_distance: Distance outside obstacles to start computing cost.
             env_query_idx: Environment index for each batch. If None, uses single env.
             return_loss: True if result will be scaled before backward pass.
-            replacement_cuboid_ids: Optional int32 (num_envs, num_spheres[, 1 or 2]) map.
+            replacement_cuboid_ids: Optional int32 (num_envs, num_spheres[, 1..8]) map.
                 Nonnegative entries replace that sphere/cuboid pair with an external
                 constraint. The caller must evaluate that constraint; -1 keeps normal checks.
+            replacement_mesh_ids: Same map contract for mesh pairs, independently of cuboid pairs.
 
         Returns:
             Collision distance tensor [batch, horizon, num_spheres].
@@ -131,6 +133,8 @@ class CollisionChecker:
         b = query_sphere.shape[0]
         if replacement_cuboid_ids is not None:
             self._validate_replacement_map(scene, query_sphere, replacement_cuboid_ids)
+        if replacement_mesh_ids is not None:
+            self._validate_replacement_map(scene, query_sphere, replacement_mesh_ids)
 
         # Setup environment query index
         use_multi_env = env_query_idx is not None
@@ -148,6 +152,7 @@ class CollisionChecker:
             use_multi_env,
             return_loss,
             replacement_cuboid_ids,
+            replacement_mesh_ids,
         )
 
     # -------------------------------------------------------------------------
@@ -166,6 +171,7 @@ class CollisionChecker:
         env_query_idx: Optional[torch.Tensor] = None,
         return_loss: bool = False,
         replacement_cuboid_ids: Optional[torch.Tensor] = None,
+        replacement_mesh_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute swept collision distance using unified autograd function.
 
@@ -183,9 +189,10 @@ class CollisionChecker:
             enable_speed_metric: Scale collision cost by sphere speed.
             env_query_idx: Environment index for each batch.
             return_loss: True if result will be scaled before backward pass.
-            replacement_cuboid_ids: Optional int32 (num_envs, num_spheres[, 1 or 2]) map.
+            replacement_cuboid_ids: Optional int32 (num_envs, num_spheres[, 1..8]) map.
                 Nonnegative entries replace that sphere/cuboid pair with an external
                 constraint. The caller must evaluate that constraint; -1 keeps normal checks.
+            replacement_mesh_ids: Same map contract for mesh pairs, independently of cuboid pairs.
 
         Returns:
             Collision distance tensor [batch, horizon, num_spheres].
@@ -193,6 +200,8 @@ class CollisionChecker:
         b = query_sphere.shape[0]
         if replacement_cuboid_ids is not None:
             self._validate_replacement_map(scene, query_sphere, replacement_cuboid_ids)
+        if replacement_mesh_ids is not None:
+            self._validate_replacement_map(scene, query_sphere, replacement_mesh_ids)
 
         # Setup environment query index
         use_multi_env = env_query_idx is not None
@@ -212,6 +221,7 @@ class CollisionChecker:
             use_multi_env,
             return_loss,
             replacement_cuboid_ids,
+            replacement_mesh_ids,
         )
 
     # -------------------------------------------------------------------------

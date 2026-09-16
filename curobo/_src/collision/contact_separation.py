@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""Bounded initial contact constraints for a static cuboid support.
+"""Bounded initial contact constraints for a static cuboid or mesh support.
 
-This experimental constraint replaces only explicitly named sphere/cuboid pairs.
+This experimental constraint replaces only explicitly named sphere/support pairs.
 It preserves the captured initial gap, prevents loss of separation until release,
 and requires the terminal configuration to clear the support. It does not model
 contact forces or make guarantees about a physical mesh behind a sphere proxy.
@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from curobo._src.collision.contact_mesh import MeshClearance
 from curobo._src.types.pose import Pose
 from curobo._src.util.logging import log_and_raise
 
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
 class StartContact:
     """One immutable initial-contact declaration for a single-environment query."""
 
-    #: Name of the static cuboid support in the collision scene.
+    #: Name of the static cuboid or mesh support in the collision scene.
     obstacle_name: str
     #: Robot sphere indices whose support contact is being replaced.
     sphere_indices: tuple[int, ...]
@@ -74,20 +75,23 @@ class StartContact:
 
 
 class ContactSeparation:
-    """Evaluate one bound declaration using GPU tensors and differentiable box distances."""
+    """Evaluate one bound declaration using GPU tensors and differentiable support distances."""
 
     def __init__(self, declaration: StartContact, scene: SceneCollision, num_spheres: int) -> None:
         """Bind a declaration to the current immutable scene and robot sphere layout."""
         self.declaration = declaration
         self.scene = scene
-        cuboids = scene.data.cuboids
-        if scene.data.num_envs != 1 or cuboids is None:
-            log_and_raise("StartContact currently requires one environment with a cuboid support")
-        if declaration.obstacle_name not in cuboids.names[0]:
-            log_and_raise(f"StartContact cuboid {declaration.obstacle_name!r} does not exist")
-        obstacle_index = cuboids.names[0].index(declaration.obstacle_name)
+        cuboids, meshes = scene.data.cuboids, scene.data.meshes
+        if scene.data.num_envs != 1:
+            log_and_raise("StartContact requires one environment")
+        self.is_mesh = meshes is not None and declaration.obstacle_name in meshes.names[0]
+        self.support_data = meshes if self.is_mesh else cuboids
+        data = self.support_data
+        if data is None or declaration.obstacle_name not in data.names[0]:
+            log_and_raise(f"StartContact support {declaration.obstacle_name!r} does not exist")
+        obstacle_index = data.names[0].index(declaration.obstacle_name)
         self.support_index = obstacle_index
-        if not bool(cuboids.enable[0, obstacle_index].item()):
+        if not bool(data.enable[0, obstacle_index].item()):
             log_and_raise("StartContact support must be enabled")
         if max(declaration.sphere_indices) >= num_spheres:
             log_and_raise("StartContact sphere index is outside the robot collision model")
@@ -96,22 +100,35 @@ class ContactSeparation:
         self.initial_spheres = torch.tensor(
             declaration.initial_spheres, device=device, dtype=torch.float32
         )
-        self.half_extents = cuboids.dims[0, obstacle_index, :3].clone() * 0.5
-        inverse = cuboids.inv_pose[0, obstacle_index, :7].clone()
+        self.half_extents = data.dims[0, obstacle_index, :3].clone() * 0.5
+        inverse = data.inv_pose[0, obstacle_index, :7].clone()
         self.captured_inverse_pose = inverse.clone()
         self.inverse_position = inverse[:3]
         self.inverse_rotation = Pose(
             position=inverse[:3], quaternion=inverse[3:7]
         ).get_rotation_matrix()[0]
+        self.mesh_index = torch.tensor([obstacle_index], device=device, dtype=torch.int32)
+        self.mesh_identity = (
+            (
+                data.mesh_ids[0, obstacle_index].clone(),
+                data.use_signed_distance[0, obstacle_index].clone(),
+            )
+            if self.is_mesh
+            else None
+        )
         self.initial_clearance = self.clearance(self.initial_spheres)
         if bool((self.initial_clearance < -declaration.max_initial_penetration).any()):
             log_and_raise(
-                "StartContact initial penetration exceeds its declared geometry tolerance"
+                "StartContact initial penetration exceeds its declared geometry tolerance: "
+                f"{float(-self.initial_clearance.min()):.6f} m > "
+                f"{declaration.max_initial_penetration:.6f} m at {declaration.obstacle_name!r}"
             )
         if bool((self.initial_clearance > declaration.numerical_tolerance).any()):
             log_and_raise("StartContact may only replace spheres actually touching the support")
         self.replacement_ids = torch.full((1, num_spheres), -1, device=device, dtype=torch.int32)
-        self.replacement_ids[0, self.indices] = obstacle_index
+        self.replacement_mesh_ids = self.replacement_ids.clone() if self.is_mesh else None
+        replacement = self.replacement_mesh_ids if self.is_mesh else self.replacement_ids
+        replacement[0, self.indices] = obstacle_index
         self.output_mask = torch.zeros(num_spheres, device=device, dtype=torch.float32)
         self.output_mask[declaration.sphere_indices[0]] = 1.0
         self.fractions = (
@@ -120,7 +137,9 @@ class ContactSeparation:
         )
 
     def clearance(self, spheres: torch.Tensor) -> torch.Tensor:
-        """Return signed sphere/OBB clearance for (..., 4) world-frame spheres."""
+        """Return sphere/support clearance for (..., 4) world-frame spheres."""
+        if self.is_mesh:
+            return MeshClearance.apply(spheres, self.support_data, self.mesh_index).squeeze(-1)
         # Matmul may use TF32 and round away the declared micrometer-scale tolerance.
         local = (
             spheres[..., 0:1] * self.inverse_rotation[:, 0]
@@ -177,12 +196,17 @@ class ContactSeparation:
 
     def geometry_cost(self, spheres: torch.Tensor) -> torch.Tensor:
         """Check captured support and radii for selected (batch, horizon, count, 4) spheres."""
-        cuboids = self.scene.data.cuboids
+        cuboids = self.scene.data.meshes if self.is_mesh else self.scene.data.cuboids
         support_changed = (
             (cuboids.inv_pose[0, self.support_index, :7] - self.captured_inverse_pose).abs().amax()
             + (cuboids.dims[0, self.support_index, :3] - 2.0 * self.half_extents).abs().amax()
             + (1.0 - cuboids.enable[0, self.support_index].to(torch.float32))
         )
+        if self.is_mesh:
+            support_changed = support_changed + (
+                (cuboids.mesh_ids[0, self.support_index] != self.mesh_identity[0])
+                | (cuboids.use_signed_distance[0, self.support_index] != self.mesh_identity[1])
+            ).to(torch.float32)
         radius_error = (
             (spheres[..., 3] - self.initial_spheres[:, 3]).abs().amax(dim=-1)
             - self.declaration.numerical_tolerance

@@ -405,6 +405,37 @@ class TrajOptSolverResult(BaseSolverResult):
         if self.js_solution is not None:
             new_result.js_solution = gather_joint_state_by_seed(self.js_solution, topk_seeds)
 
+        if not bool(new_result.success.any()):
+            debug = {} if new_result.debug_info is None else dict(new_result.debug_info)
+            summary = {}
+            for label, metrics in (
+                ("optimized", self.metrics),
+                ("interpolated", self.interpolated_metrics),
+            ):
+                if metrics is not None:
+                    group = metrics.costs_and_constraints.constraints
+                    summary[label] = {
+                        name: {
+                            "maximum": float(
+                                value.reshape(batch_size * self.num_seeds, value.shape[1], -1)[
+                                    flat_indices
+                                ].max()
+                            ),
+                            "start": float(
+                                value.reshape(batch_size * self.num_seeds, value.shape[1], -1)[
+                                    flat_indices, 0
+                                ].max()
+                            ),
+                            "end": float(
+                                value.reshape(batch_size * self.num_seeds, value.shape[1], -1)[
+                                    flat_indices, -1
+                                ].max()
+                            ),
+                        }
+                        for name, value in zip(group.names, group.values)
+                    }
+            debug["selected_constraint_maxima"] = summary
+            new_result.debug_info = debug
         new_result.interpolated_metrics = None
         new_result.metrics = None
         if self.interpolated_last_tstep is not None:
@@ -457,4 +488,3 @@ class TrajOptSolverResult(BaseSolverResult):
             self.interpolated_metrics.copy_only_index(other.interpolated_metrics, flat_indices)
 
         super().copy_successful_solutions(other)
-

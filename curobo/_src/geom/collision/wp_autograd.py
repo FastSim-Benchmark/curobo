@@ -54,6 +54,7 @@ class SphereObstacleCollision(torch.autograd.Function):
         use_multi_env: bool,
         return_loss: bool = False,
         replacement_cuboid_ids: Optional[torch.Tensor] = None,
+        replacement_mesh_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass: compute collision distance to all scene obstacles.
 
@@ -89,9 +90,13 @@ class SphereObstacleCollision(torch.autograd.Function):
         use_multi_env_wp = wp.uint8(use_multi_env) #wp.uint8(1) if use_multi_env else wp.uint8(0)
         if replacement_cuboid_ids is None:
             replacement_cuboid_ids = torch.empty(0, device=query_spheres.device, dtype=torch.int32)
-        replacement_wp = wp.from_torch(replacement_cuboid_ids.view(-1))
+        if replacement_mesh_ids is None:
+            replacement_mesh_ids = torch.empty(0, device=query_spheres.device, dtype=torch.int32)
 
         for data in scene.get_valid_data():
+            pairs = replacement_mesh_ids if data is scene.meshes else replacement_cuboid_ids
+            enabled_pairs = data is scene.meshes or data is scene.cuboids
+            replacement_wp = wp.from_torch(pairs.view(-1))
             max_n = data.max_n
             data_wp = data.to_warp()
             wp.launch(
@@ -103,10 +108,10 @@ class SphereObstacleCollision(torch.autograd.Function):
                     replacement_wp,
                     wp.int32(
                         (
-                            replacement_cuboid_ids.shape[-1]
-                            if replacement_cuboid_ids.ndim == 3 else 1
+                            pairs.shape[-1]
+                            if pairs.ndim == 3 else 1
                         )
-                        if data is scene.cuboids and replacement_cuboid_ids.numel() > 0 else 0
+                        if enabled_pairs and pairs.numel() > 0 else 0
                     ),
                 ],
                 stream=stream,
@@ -137,6 +142,7 @@ class SphereObstacleCollision(torch.autograd.Function):
             None,  # use_multi_env
             None,  # return_loss
             None,  # replacement_cuboid_ids
+            None,  # replacement_mesh_ids
         )[:len(ctx.needs_input_grad)]
 
 
@@ -163,6 +169,7 @@ class SweptSphereObstacleCollision(torch.autograd.Function):
         use_multi_env: bool,
         return_loss: bool = False,
         replacement_cuboid_ids: Optional[torch.Tensor] = None,
+        replacement_mesh_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass: compute swept collision distance to all scene obstacles.
 
@@ -201,9 +208,13 @@ class SweptSphereObstacleCollision(torch.autograd.Function):
         use_multi_env_wp = wp.uint8(use_multi_env)
         if replacement_cuboid_ids is None:
             replacement_cuboid_ids = torch.empty(0, device=query_spheres.device, dtype=torch.int32)
-        replacement_wp = wp.from_torch(replacement_cuboid_ids.view(-1))
+        if replacement_mesh_ids is None:
+            replacement_mesh_ids = torch.empty(0, device=query_spheres.device, dtype=torch.int32)
 
         for data in scene.get_valid_data():
+            pairs = replacement_mesh_ids if data is scene.meshes else replacement_cuboid_ids
+            enabled_pairs = data is scene.meshes or data is scene.cuboids
+            replacement_wp = wp.from_torch(pairs.view(-1))
             max_n = data.max_n
             data_wp = data.to_warp()
             wp.launch(
@@ -225,10 +236,10 @@ class SweptSphereObstacleCollision(torch.autograd.Function):
                     replacement_wp,
                     wp.int32(
                         (
-                            replacement_cuboid_ids.shape[-1]
-                            if replacement_cuboid_ids.ndim == 3 else 1
+                            pairs.shape[-1]
+                            if pairs.ndim == 3 else 1
                         )
-                        if data is scene.cuboids and replacement_cuboid_ids.numel() > 0 else 0
+                        if enabled_pairs and pairs.numel() > 0 else 0
                     ),
                 ],
                 stream=stream,
@@ -281,4 +292,5 @@ class SweptSphereObstacleCollision(torch.autograd.Function):
             None,  # use_multi_env
             None,  # return_loss
             None,  # replacement_cuboid_ids
+            None,  # replacement_mesh_ids
         )[:len(ctx.needs_input_grad)]

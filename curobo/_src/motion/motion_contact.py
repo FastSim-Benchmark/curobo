@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Iterator
 import torch
 
 from curobo._src.collision.contact_approach import ContactApproach, GoalContact
+from curobo._src.collision.contact_departure_set import ContactDepartureSet
+from curobo._src.collision.contact_mesh import MeshClearance
 from curobo._src.collision.contact_separation import ContactSeparation, StartContact
 from curobo._src.collision.contact_transfer import ContactTransfer
 from curobo._src.state.state_joint import JointState
@@ -73,18 +75,33 @@ def contact_goal_seed(
 
 
 def capture_contact(
-    planner: MotionPlanner, state: JointState | None, *, terminal: bool
-) -> StartContact | GoalContact | None:
-    """Capture shallow sphere/box endpoint contacts in the planner's current frame."""
+    planner: MotionPlanner,
+    state: JointState | None,
+    *,
+    terminal: bool,
+    max_initial_penetration: float = 0.002,
+    contact_links: tuple[str, ...] | None = None,
+) -> StartContact | GoalContact | tuple[StartContact, ...] | None:
+    """Capture bounded static support contacts in the current planning frame."""
     scene = planner.scene_collision_checker
-    if state is None or scene is None or scene.data.cuboids is None:
+    if state is None or scene is None:
         return None
     if state.shape[0] != 1 or scene.data.num_envs != 1:
         log_and_raise("Boundary contact currently requires one planning problem and environment")
     spheres = planner.compute_kinematics(state).robot_spheres.reshape(-1, 4)
+    eligible = torch.ones(len(spheres), device=spheres.device, dtype=torch.bool)
+    if contact_links is not None:
+        if not contact_links or len(set(contact_links)) != len(contact_links):
+            log_and_raise("contact_links must name distinct robot links")
+        eligible.zero_()
+        for link in contact_links:
+            ids = planner.attachment_manager.kinematics_params.get_sphere_index_from_link_name(
+                link
+            )
+            eligible[ids] = True
     cuboids = scene.data.cuboids
     contacts = []
-    for index, name in enumerate(cuboids.names[0]):
+    for index, name in enumerate(cuboids.names[0] if cuboids is not None else ()):
         if not bool(cuboids.enable[0, index].item()):
             continue
         inverse = cuboids.inv_pose[0, index, :7]
@@ -97,7 +114,7 @@ def capture_contact(
         )
         outside = local.abs() - cuboids.dims[0, index, :3] * 0.5
         gap = outside.clamp_min(0).norm(dim=-1) + outside.amax(-1).clamp_max(0) - spheres[:, 3]
-        indices = torch.nonzero((spheres[:, 3] > 0) & (gap <= 1.0e-5)).reshape(-1)
+        indices = torch.nonzero(eligible & (spheres[:, 3] > 0) & (gap <= 1.0e-5)).reshape(-1)
         if indices.numel() == 0:
             continue
         selected = tuple(indices.tolist())
@@ -105,7 +122,9 @@ def capture_contact(
         declaration = (
             GoalContact(name, selected, geometry)
             if terminal
-            else StartContact(name, selected, geometry)
+            else StartContact(
+                name, selected, geometry, max_initial_penetration=max_initial_penetration
+            )
         )
         # Validate depth, identity, and enabled geometry before installing any exemption.
         captured = (
@@ -113,9 +132,30 @@ def capture_contact(
         )
         ContactSeparation(captured, scene, len(spheres))
         contacts.append(declaration)
+    meshes = scene.data.meshes
+    if not terminal and meshes is not None:
+        mesh_indices = torch.nonzero(meshes.enable[0]).reshape(-1).to(torch.int32)
+        if mesh_indices.numel():
+            gaps = MeshClearance.apply(spheres, meshes, mesh_indices)
+            touching = eligible[:, None] & (spheres[:, 3:4] > 0) & (gaps <= 1.0e-5)
+            for column in torch.nonzero(touching.any(0)).reshape(-1).tolist():
+                index = int(mesh_indices[column])
+                indices = torch.nonzero(touching[:, column]).reshape(-1)
+                declaration = StartContact(
+                    meshes.names[0][index],
+                    tuple(indices.tolist()),
+                    tuple(tuple(row) for row in spheres[indices].tolist()),
+                    max_initial_penetration=max_initial_penetration,
+                )
+                ContactSeparation(declaration, scene, len(spheres))
+                contacts.append(declaration)
+    if len(contacts) > 1 and not terminal:
+        if len(contacts) > 8:
+            log_and_raise("Start contact supports at most 8 initial supports")
+        return tuple(contacts)
     if len(contacts) > 1:
         log_and_raise(
-            "Boundary contact supports one static cuboid per endpoint; "
+            "Boundary contact supports one static support per endpoint; "
             "multiple supports are ambiguous"
         )
     return contacts[0] if contacts else None
@@ -123,13 +163,35 @@ def capture_contact(
 
 @contextmanager
 def boundary_contact_scope(
-    planner: MotionPlanner, start: JointState, goal: JointState | None, mode: str
+    planner: MotionPlanner,
+    start: JointState,
+    goal: JointState | None,
+    mode: str,
+    max_initial_penetration: float = 0.002,
+    contact_links: tuple[str, ...] | None = None,
 ) -> Iterator[None]:
     """Install contact constraints before graph capture and restore them on every exit."""
     departure = (
-        capture_contact(planner, start, terminal=False) if mode in {"start", "both"} else None
+        capture_contact(
+            planner,
+            start,
+            terminal=False,
+            max_initial_penetration=max_initial_penetration,
+            contact_links=contact_links,
+        )
+        if mode in {"start", "both"}
+        else None
     )
     arrival = capture_contact(planner, goal, terminal=True) if mode in {"end", "both"} else None
+    if isinstance(departure, tuple) and mode == "both":
+        log_and_raise("Multiple supports currently require start-only contact")
+    if (
+        departure is not None
+        and mode == "both"
+        and planner.scene_collision_checker.data.meshes is not None
+    ):
+        if departure.obstacle_name in planner.scene_collision_checker.data.meshes.names[0]:
+            log_and_raise("Mesh support contact currently supports start-only queries")
     if departure is None and arrival is None:
         yield
         return
@@ -153,6 +215,8 @@ def boundary_contact_scope(
                         )
                 elif departure is not None and arrival is not None:
                     cost._contact = ContactTransfer(departure, arrival, scene, count)
+                elif isinstance(departure, tuple):
+                    cost._contact = ContactDepartureSet(departure, scene, count)
                 elif departure is not None:
                     cost._contact = ContactSeparation(departure, scene, count)
                 else:

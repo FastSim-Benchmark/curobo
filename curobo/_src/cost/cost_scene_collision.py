@@ -110,6 +110,7 @@ class SceneCollisionCost(BaseCost):
                 env_query_idx=idxs_env_query,
                 return_loss=self.config.use_grad_input,
                 replacement_cuboid_ids=self._contact.replacement_ids,
+                replacement_mesh_ids=getattr(self._contact, "replacement_mesh_ids", None),
             )
             if self.config.use_sweep:
                 distance = checker.checker.get_swept_sphere_distance(
