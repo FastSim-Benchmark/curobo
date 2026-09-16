@@ -35,6 +35,14 @@ name shared with another environment is rejected. A device or geometry-load erro
 during mutation can leave a partial update: discard the owning planner on such an
 error before further planning. This API does not promise transactional rollback.
 
+## Passive joint effort
+
+Complete robot models may retain passive joints with a URDF effort interval of
+`[0, 0]`. This bound remains zero through loading and cloning; it does not grant
+actuation. Kinematic motion profiles must hold any passive coordinate that the
+controller cannot command. Reversed, non-finite and nonzero equal effort bounds
+remain invalid.
+
 ## Citation
 
 If you found this work useful, please cite cuRoboV2,

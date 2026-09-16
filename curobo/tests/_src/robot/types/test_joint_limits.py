@@ -147,3 +147,21 @@ class TestJointLimitsValidateShapeMethod:
         # If we get here, test passed
         assert True
 
+
+
+def test_passive_joint_zero_effort_preserves_coordinate_and_clone(cuda_device_cfg):
+    bounds = torch.tensor([[-1.0, -1.0], [1.0, 1.0]], **cuda_device_cfg.as_torch_dict())
+    effort = torch.tensor([[0.0, -2.0], [0.0, 2.0]], **cuda_device_cfg.as_torch_dict())
+    limits = JointLimits(["passive", "active"], bounds, bounds, bounds, bounds, effort, cuda_device_cfg)
+    clone = limits.clone()
+    assert clone.joint_names == ["passive", "active"]
+    assert torch.equal(clone.effort, effort)
+    assert clone.effort.data_ptr() != effort.data_ptr()
+
+
+@pytest.mark.parametrize("lower, upper", [(1.0, 1.0), (2.0, -2.0), (float("nan"), 1.0), (-1.0, float("inf"))])
+def test_invalid_effort_interval_remains_rejected(cuda_device_cfg, lower, upper):
+    bounds = torch.tensor([[-1.0], [1.0]], **cuda_device_cfg.as_torch_dict())
+    effort = torch.tensor([[lower], [upper]], **cuda_device_cfg.as_torch_dict())
+    with pytest.raises(ValueError, match="effort"):
+        JointLimits(["joint"], bounds, bounds, bounds, bounds, effort, cuda_device_cfg)

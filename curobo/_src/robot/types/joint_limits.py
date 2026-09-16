@@ -57,8 +57,11 @@ class JointLimits:
             log_and_raise("lower acceleration limits must be less than upper acceleration limits")
         if (self.jerk[0, :] >= self.jerk[1, :]).any():
             log_and_raise("lower jerk limits must be less than upper jerk limits")
-        if self.effort is not None and (self.effort[0, :] >= self.effort[1, :]).any():
-            log_and_raise("lower effort limits must be less than upper effort limits")
+        if self.effort is not None:
+            lower, upper = self.effort
+            passive = (lower == 0) & (upper == 0)
+            if ((lower >= upper) & ~passive).any() or not torch.isfinite(self.effort).all():
+                log_and_raise("lower effort limits must be less than upper effort limits, except passive [0, 0]")
 
     @staticmethod
     def from_data_dict(
