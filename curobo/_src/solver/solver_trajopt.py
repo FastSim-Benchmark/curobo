@@ -491,6 +491,9 @@ class TrajOptSolver:
         interpolated_rollout = self.additional_metrics_rollouts["interpolated_rollout"]
 
         interpolated_js, last_tstep, buffer_updated = self.get_interpolated_trajectory(js_optimized)
+        interpolated_js = interpolated_rollout.transition_model.project_held_coordinates(
+            interpolated_js
+        )
         interpolated_robot_state = interpolated_rollout.transition_model.compute_augmented_state(
             interpolated_js
         )

@@ -744,6 +744,24 @@ class MotionPlanner:
             self.graph_planner.reset_buffer()
             self.graph_planner.reset_seed()
 
+    def update_joint_limits(self, *, position=None, velocity=None, acceleration=None, jerk=None):
+        """Update limits between solves while preserving all native solver instances.
+
+        Each supplied array has shape ``(2, dof)`` in :attr:`joint_names` order.
+        Equal position bounds hold a joint at a captured coordinate; derivative
+        limits remain strictly negative/positive. Shapes and robot topology cannot
+        change. Callers must validate start and goal states against held joints.
+        Cached sampling ranges, optimizer bounds and validation costs are updated
+        in place, so existing CUDA graphs continue using the new values.
+        """
+        if self._destroyed:
+            raise RuntimeError("motion planner is destroyed")
+        from curobo._src.motion.motion_joint_limits import update_joint_limits
+
+        update_joint_limits(
+            self, position=position, velocity=velocity, acceleration=acceleration, jerk=jerk
+        )
+
     def update_link_inertial(
         self, link_name: str,
         mass: Optional[float] = None,

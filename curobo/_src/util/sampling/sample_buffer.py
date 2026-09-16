@@ -97,6 +97,19 @@ class SampleBuffer:
             self._generator_initial_state = self._int_gen.get_state().clone()
             self._index_buffer = None
 
+    def update_bounds(self, low_bounds: torch.Tensor, up_bounds: torch.Tensor) -> None:
+        """Replace bounds without replacing the sequencer or cached uniform samples."""
+        if low_bounds.shape != self.low_bounds.shape or up_bounds.shape != self.up_bounds.shape:
+            raise ValueError("sample bound shapes cannot change")
+        if not bool(torch.isfinite(low_bounds).all() & torch.isfinite(up_bounds).all()):
+            raise ValueError("sample bounds must be finite")
+        if bool((low_bounds > up_bounds).any()):
+            raise ValueError("lower sample bounds exceed upper bounds")
+        self.low_bounds.copy_(low_bounds)
+        self.up_bounds.copy_(up_bounds)
+        self.range_b.copy_(up_bounds - low_bounds)
+        self.reset()
+
     def reset(self):
         """Reset generator to initial state."""
         if self._sample_buffer is not None:

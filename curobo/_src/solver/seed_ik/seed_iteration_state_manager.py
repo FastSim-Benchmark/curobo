@@ -253,8 +253,7 @@ class SeedIterationStateManager:
     ) -> torch.Tensor:
         """Check if joint limits are satisfied."""
         within_limits = torch.logical_and(
-            joint_position > self.action_min,
-            joint_position < self.action_max,
+            joint_position >= self.action_min,
+            joint_position <= self.action_max,
         )
         return torch.all(within_limits, dim=-1)
-

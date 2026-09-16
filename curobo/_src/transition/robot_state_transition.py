@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 # Standard Library
+from dataclasses import replace
 from typing import TYPE_CHECKING, Optional, Union
 
 # Third Party
@@ -254,7 +255,30 @@ class RobotStateTransition:
             use_implicit_goal_state=use_implicit_goal_state,
         )
 
-        return state_seq
+        return self.project_held_coordinates(state_seq)
+
+    def project_held_coordinates(self, state: JointState) -> JointState:
+        """Remove spline roundoff from coordinates constant at an equality bound.
+
+        Every sample must already equal the held value within four float32 ULPs
+        at unit scale. Real violations remain untouched for constraint checking.
+        The tensor mask reads resident limits during CUDA graph replay.
+        """
+        lower, upper = self.joint_limits.position.unbind(0)
+        roundoff = 4.0 * torch.finfo(torch.float32).eps * lower.abs().clamp_min(1.0)
+        near = (state.position - lower).abs() <= roundoff
+        if state.position.ndim >= 3:
+            near = near.all(dim=-2, keepdim=True)
+        held = (lower == upper) & near
+        derivatives = {
+            name: (
+                None
+                if getattr(state, name) is None
+                else torch.where(held, 0.0, getattr(state, name))
+            )
+            for name in ("velocity", "acceleration", "jerk")
+        }
+        return replace(state, position=torch.where(held, lower, state.position), **derivatives)
 
     def robot_cmd_tensor_step(
         self,
@@ -284,7 +308,7 @@ class RobotStateTransition:
         )
 
         state_seq.joint_names = self.joint_names
-        return state_seq
+        return self.project_held_coordinates(state_seq)
 
     def update_cmd_batch_size(self, batch_size):
         if self._cmd_batch_size != batch_size:

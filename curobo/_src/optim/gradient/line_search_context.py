@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 from dataclasses import dataclass
-from typing import Callable, List, Union
+from typing import Callable, List, Optional, Union
 
 import torch
 
@@ -45,6 +45,10 @@ class LineSearchContext:
 
     #: Threshold relative difference in cost to store as new best. rel = (cost_best - cost_new)/ cost_best
     cost_relative_threshold: float
+
+    #: Resident horizon-expanded bounds; equality coordinates never participate in a step.
+    action_lower_bounds: Optional[torch.Tensor] = None
+    action_upper_bounds: Optional[torch.Tensor] = None
 
     def __post_init__(self):
         if isinstance(self.line_search_scale, List):

@@ -171,6 +171,15 @@ class LineSearchStrategy(ABC):
             )
 
         step_direction = step_direction.detach()
+        if context.action_lower_bounds is not None and context.action_upper_bounds is not None:
+            lower = context.action_lower_bounds.view(1, context.action_horizon, context.action_dim)
+            upper = context.action_upper_bounds.view(1, context.action_horizon, context.action_dim)
+            held = lower == upper
+            # Apply equality coordinates even when step scaling is disabled.
+            # Initial seeds may predate a hold update; evaluate them on the
+            # admissible subspace before recording an optimizer best state.
+            x = torch.where(held, lower, x)
+            step_direction = torch.where(held, 0.0, step_direction)
 
         if (context.step_scale != 0.0 and context.step_scale != 1.0) or (
             context.fix_terminal_action and context.action_horizon > 1
@@ -311,7 +320,9 @@ class LineSearchStrategy(ABC):
             # dx_flat = dx.view(dx.shape[0], -1)
             action_step_max_flat = action_step_max.view(1, 1, -1)
 
-            diff = torch.abs(dx) / action_step_max_flat
+            movable = action_step_max_flat > 0.0
+            dx = torch.where(movable, dx, 0.0)
+            diff = torch.abs(dx) / torch.where(movable, action_step_max_flat, 1.0)
             scale_value = torch.max(diff.view(dx.shape[0], -1), dim=-1, keepdim=False)[0]
 
             new_scale = torch.clamp(scale_value, min=1.0)

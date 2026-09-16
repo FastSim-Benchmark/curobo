@@ -626,6 +626,8 @@ class GradientOptCore:
             step_scale=self.config.step_scale,
             fix_terminal_action=self.config.fix_terminal_action,
             action_horizon_step_max=self._bounds.step_max,
+            action_lower_bounds=self._bounds.horizon_lows,
+            action_upper_bounds=self._bounds.horizon_highs,
             line_search_scale=self.config.line_search_scale,
             num_problems=self.config.num_problems,
             convergence_iteration=self.config.convergence_iteration,

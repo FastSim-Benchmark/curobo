@@ -327,8 +327,8 @@ class SeedIKSolver:
 
         if self.config.joint_limit_weight > 0:
             joint_limit_success = torch.logical_and(
-                joint_position > self.joint_limits.position[0],
-                joint_position < self.joint_limits.position[1],
+                joint_position >= self.joint_limits.position[0],
+                joint_position <= self.joint_limits.position[1],
             )
             # joint limit success is batch_size, dof
             joint_limit_success = torch.all(joint_limit_success, dim=-1)

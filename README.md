@@ -43,6 +43,25 @@ actuation. Kinematic motion profiles must hold any passive coordinate that the
 controller cannot command. Reversed, non-finite and nonzero equal effort bounds
 remain invalid.
 
+## Runtime motion limits
+
+`MotionPlanner.update_joint_limits(position=..., velocity=..., acceleration=...,
+jerk=...)` updates named limit tensors of shape `(2, dof)` in place, in the
+planner's joint order. Omitted quantities retain their current values. All inputs
+are validated before mutation; derivative intervals must strictly bracket zero.
+Equal position bounds hold a coordinate, and restoring the original bounds
+releases it. The caller must supply start/goal states compatible with the holds
+and physical robot limits.
+
+The update preserves the planner, IK, trajectory optimizer, graph planner and
+captured CUDA graphs. Sampling bounds and constraint validators update together;
+old seeds and roadmaps are cleared. Spline roundoff on a held coordinate is
+projected to its constant position and zero derivatives before validation and
+output, only when every sample is within four float32 ULPs at unit scale. Larger
+violations remain subject to the ordinary constraint checks. Topology, tools and
+collision capacity must be admitted at construction. Calls must be serialized
+with planning; this method does not coordinate concurrent callers.
+
 ## Citation
 
 If you found this work useful, please cite cuRoboV2,

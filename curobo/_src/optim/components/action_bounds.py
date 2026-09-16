@@ -32,9 +32,18 @@ class ActionBounds:
 
     def refresh(self, action_bound_lows: torch.Tensor, action_bound_highs: torch.Tensor,
                 action_horizon: int):
-        """Recompute if action_horizon changed."""
+        """Refresh values in place when the shape is unchanged (CUDA graph safe)."""
         if action_horizon != self._action_horizon:
             self._action_horizon = action_horizon
             self.lows = action_bound_lows
             self.highs = action_bound_highs
             self._compute(action_bound_lows, action_bound_highs, action_horizon, self._step_scale)
+        else:
+            self.lows.copy_(action_bound_lows)
+            self.highs.copy_(action_bound_highs)
+            self.horizon_lows.view(action_horizon, -1).copy_(action_bound_lows)
+            self.horizon_highs.view(action_horizon, -1).copy_(action_bound_highs)
+            self.horizon_step_max.copy_(
+                self._step_scale * (self.horizon_highs - self.horizon_lows).abs()
+            )
+            self.step_max.copy_(self._step_scale * (action_bound_highs - action_bound_lows).abs())
