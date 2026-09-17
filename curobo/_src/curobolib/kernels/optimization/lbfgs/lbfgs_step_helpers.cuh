@@ -230,7 +230,7 @@ namespace lbfgs{
             ScalarType rho = 1.0 / denominator;
 
             // Stability check: avoid division by zero
-            if (stable_mode && (denominator <= 0.0)) {
+            if (stable_mode && (isinf(rho) || isnan(rho))) {
                 rho = 0.0;
             }
 

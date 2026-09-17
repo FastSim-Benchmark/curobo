@@ -270,6 +270,8 @@ class MotionPlanner:
         Parameters last for this call only. ``allow_boundary_collision`` accepts
         ``none``, ``start``, ``end``, or ``both`` for bounded static-cuboid endpoint
         contacts. Other pairs and self collision retain their ordinary checks.
+        ``config.trajopt_finetune_attempts`` controls optional additional
+        time-optimal passes without changing initial-solve validation.
         """
         from curobo._src.motion.motion_contact import (
             boundary_contact_scope,
@@ -371,6 +373,8 @@ class MotionPlanner:
                 finetune_attempts = 3
                 finetune_dt_scale = 0.75
 
+            if self.config.trajopt_finetune_attempts is not None:
+                finetune_attempts = self.config.trajopt_finetune_attempts
             trajopt_result = self.trajopt_solver.solve_pose(
                 goal_tool_poses, current_state,
                 seed_config=seed_config,
@@ -406,10 +410,15 @@ class MotionPlanner:
             if torch.count_nonzero(ik_result.success) == 0:
                 return None
 
+            finetune_kwargs = (
+                {} if self.config.trajopt_finetune_attempts is None
+                else {"finetune_attempts": self.config.trajopt_finetune_attempts}
+            )
             trajopt_result = self.trajopt_solver.solve_pose(
                 goal_tool_poses, current_state,
                 seed_config=ik_result.solution,
                 use_implicit_goal=use_implicit_goal,
+                **finetune_kwargs,
             )
             if torch.count_nonzero(trajopt_result.success) > 0:
                 break
@@ -430,7 +439,10 @@ class MotionPlanner:
         max_initial_penetration: float = 0.002,
         contact_links: tuple[str, ...] | None = None,
     ) -> Optional[TrajOptSolverResult]:
-        """Plan to a partial joint goal set; free and held coordinates are explicit."""
+        """Plan to a partial joint goal set; free and held coordinates are explicit.
+
+        Optional time-optimal passes follow ``config.trajopt_finetune_attempts``.
+        """
         from curobo._src.motion.motion_posture import plan_posture
         return plan_posture(
             self, goal_states, current_state,
@@ -456,6 +468,8 @@ class MotionPlanner:
         ``allow_boundary_collision`` selects bounded static-cuboid contacts at
         ``start``, ``end``, ``both``, or neither (``none``). Request constraints are
         cleared even when planning raises an exception.
+        ``config.trajopt_finetune_attempts`` controls optional additional
+        time-optimal passes without changing initial-solve validation.
         """
         from curobo._src.motion.motion_contact import (
             boundary_contact_scope,
@@ -519,6 +533,8 @@ class MotionPlanner:
                 finetune_attempts = 3
                 finetune_dt_scale = 0.75
 
+            if self.config.trajopt_finetune_attempts is not None:
+                finetune_attempts = self.config.trajopt_finetune_attempts
             trajopt_result = self.trajopt_solver.solve_cspace(
                 goal_state, current_state, seed_traj=seed_traj,
                 finetune_attempts=finetune_attempts,

@@ -59,12 +59,17 @@ def posture_scope(
     ):
         raise ValueError("held joint start exceeds position limits")
     costs, saved, axis_weights = [], [], []
+    solvers = (planner.ik_solver, planner.trajopt_solver)
     try:
+        # Enabling posture changes which residuals execute in the rollout.
+        # Resident CUDA graphs must include the current request's constraint.
+        for solver in solvers:
+            solver.core.invalidate_parameter_graphs()
         if held_mask.any():
             constrained_limits = original_limits.clone()
             constrained_limits[:, held_mask] = initial[:, held_mask]
             planner.update_joint_limits(position=constrained_limits)
-        for solver in (planner.ik_solver, planner.trajopt_solver):
+        for solver in solvers:
             rollouts = [
                 *solver.core.get_all_rollout_instances(),
                 *solver.core.additional_metrics_rollouts.values(),
@@ -108,10 +113,12 @@ def posture_scope(
         for cost, weight in axis_weights:
             cost._weight.copy_(weight)
         for cost in costs:
-            cost.active.zero_()
+            cost.deactivate()
         for cost, a, b in saved:
             cost._stacked_tool_pose_criteria.terminal_pose_axes_weight_factor.copy_(a)
             cost._stacked_tool_pose_criteria.non_terminal_pose_axes_weight_factor.copy_(b)
+        for solver in solvers:
+            solver.core.invalidate_parameter_graphs()
 
 
 def plan_posture(

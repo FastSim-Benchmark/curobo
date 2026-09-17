@@ -23,6 +23,12 @@ from curobo._src.util.logging import log_and_raise
 from curobo.content import get_robot_configs_path, get_scene_configs_path
 
 
+def _validate_trajopt_finetune_attempts(value: Optional[int]) -> None:
+    """Reject invalid optional counts before constructing solver resources."""
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+        log_and_raise("trajopt_finetune_attempts must be None or a nonnegative integer")
+
+
 @dataclass
 class MotionPlannerCfg:
     """Configuration for the motion planner."""
@@ -32,6 +38,12 @@ class MotionPlannerCfg:
     graph_planner_config: PRMGraphPlannerCfg = None
     scene_collision_cfg: Optional[SceneCollisionCfg] = None
     device_cfg: DeviceCfg = DeviceCfg()
+    #: Override extra time-optimal passes in MotionPlanner; None preserves branch defaults.
+    trajopt_finetune_attempts: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        """Validate the optional refinement override before planner construction."""
+        _validate_trajopt_finetune_attempts(self.trajopt_finetune_attempts)
 
     @staticmethod
     def create(
@@ -70,6 +82,7 @@ class MotionPlannerCfg:
         max_goalset: int = 1,
         interpolation_dt: float = 0.025,
         interpolation_buffer_size: int = 1000,
+        trajopt_finetune_attempts: Optional[int] = None,
     ) -> MotionPlannerCfg:
         """Create a MotionPlannerCfg from robot, task, and scene configs.
 
@@ -163,11 +176,18 @@ class MotionPlannerCfg:
                 smaller ``interpolation_dt`` or longer trajectories. Larger
                 buffers can significantly increase GPU memory usage because
                 state buffers are allocated for every batched seed trajectory.
+            trajopt_finetune_attempts: Optional override for the additional
+                time-optimal refinement passes in single-problem MotionPlanner
+                pose, joint, and posture queries. None preserves each planning
+                branch's existing default. Zero runs only the initial solve,
+                including retiming and complete trajectory validation; the
+                resulting motion may take longer to execute.
 
         Returns:
             MotionPlannerCfg containing IK, TrajOpt, graph planner, and
             optional scene collision configuration.
         """
+        _validate_trajopt_finetune_attempts(trajopt_finetune_attempts)
         if num_ik_seeds is None:
             num_ik_seeds = 16 if max_batch_size > 1 else 32
         if num_trajopt_seeds is None:
@@ -270,4 +290,5 @@ class MotionPlannerCfg:
             graph_planner_config=graph_planner_cfg,
             scene_collision_cfg=scene_collision_cfg,
             device_cfg=device_cfg,
+            trajopt_finetune_attempts=trajopt_finetune_attempts,
         )

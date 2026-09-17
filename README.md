@@ -28,7 +28,20 @@ Key capabilities:
 only named mesh/cuboid obstacles within preallocated capacities. Existing names
 replace geometry, new names add slots, and removed names recycle slots. Unmentioned
 meshes retain their Warp acceleration structures and device buffers retain their
-addresses. Use the existing pose-update API when geometry is unchanged.
+addresses. When geometry is unchanged, use
+`SceneCollision.update_obstacle_poses(names, poses, env_idx=0)` with one `Pose`
+containing position `(N, 3)` and quaternion `(N, 4)` tensors in name order. The
+batch API also covers voxel poses, preserves enable flags and performs one batch
+inverse followed by in-place writes. It checks every name, environment, shape,
+device, dtype and finite/unit-quaternion value before any pose write. Names must
+be unique and present; empty batches are allowed. Quaternion squared norms must
+be within `1e-5` of one. No broadcasting or implicit device conversion is applied.
+
+Pose updates must be serialized with queries and other updates. Validation reads
+a device scalar, so call outside CUDA graph capture; previously captured query
+graphs continue reading the same buffers. Runtime/device failures during writes
+require discarding the owning planner. The scalar and batch pose APIs update
+device storage only; the CPU `scene_model` reference is unchanged.
 
 The method validates names, types and capacity before mutation. Replacing a mesh
 name shared with another environment is rejected. A device or geometry-load error
@@ -61,6 +74,21 @@ output, only when every sample is within four float32 ULPs at unit scale. Larger
 violations remain subject to the ordinary constraint checks. Topology, tools and
 collision capacity must be admitted at construction. Calls must be serialized
 with planning; this method does not coordinate concurrent callers.
+
+## Optional trajectory time refinement
+
+`MotionPlannerCfg.create(..., trajopt_finetune_attempts=0)` runs the initial
+trajectory optimization and skips additional time-optimal refinement passes for
+`MotionPlanner` pose, joint and posture queries, including goalsets and graph-seeded
+queries. Initial optimization, velocity/acceleration/jerk retiming, collision and
+feasibility metrics, interpolated-trajectory validation and result ranking remain
+active. Planning can finish sooner, while the resulting motion may take longer
+to execute; compare total planning and execution time for the intended task.
+
+The default `None` preserves each branch's existing refinement policy. Explicit
+values must be nonnegative integers; booleans, negative values and nonintegers are
+rejected before solver construction. `BatchMotionPlanner` retains its own
+per-query refinement parameters.
 
 ## Citation
 

@@ -120,6 +120,11 @@ class LBFGSLaunchCfg:
         else:
             shared_mem_size = basic_smem_size
 
+        if not use_shared_buffers_actual:
+            # The global-memory kernel retains only the history-sized alpha
+            # vector in dynamic shared memory, even after a rejected request.
+            shared_mem_size = basic_smem_size
+
         config = LaunchConfig(
             grid=blocks_per_grid, block=threads_per_block, shmem_size=shared_mem_size
         )

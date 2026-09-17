@@ -15,6 +15,7 @@ The design separates:
 from __future__ import annotations
 
 # Standard Library
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
@@ -432,6 +433,20 @@ class SceneCollision:
             env_idx: Environment index.
         """
         self.data.update_obstacle_pose(name, w_obj_pose, env_idx)
+
+    def update_obstacle_poses(
+        self, names: Sequence[str], poses: Pose, env_idx: int = 0
+    ) -> None:
+        """Update a batch of world poses with complete preflight validation.
+
+        Position and unit quaternion tensors must have shapes ``(N, 3)`` and
+        ``(N, 4)`` on the collision storage device and dtype. All names must be
+        unique and exist in ``env_idx``. Geometry, flags, buffer addresses and
+        CPU scene references remain unchanged. Serialize with queries and call
+        outside CUDA graph capture. See :meth:`SceneData.update_obstacle_poses`
+        for validation and runtime failure semantics.
+        """
+        self.data.update_obstacle_poses(names, poses, env_idx)
 
     def enable_obstacle(self, name: str, enable: bool = True, env_idx: int = 0):
         """Enable or disable an obstacle.

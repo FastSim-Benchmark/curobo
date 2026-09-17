@@ -267,7 +267,7 @@ launch_lbfgs_step(torch::Tensor step_vec, torch::Tensor rho_buffer,
             grad_q.data_ptr<float>(),
             epsilon, batch_size, history_m, v_dim, stable_mode);
     } else {
-        const int basic_smem_size = history_m * v_dim * sizeof(float);
+        const int basic_smem_size = history_m * sizeof(float);
         kernel_pair.stable_kernel<<<config.blocksPerGrid, config.threadsPerBlock, basic_smem_size, stream>>>(
             step_vec.data_ptr<float>(),
             rho_buffer.data_ptr<float>(),

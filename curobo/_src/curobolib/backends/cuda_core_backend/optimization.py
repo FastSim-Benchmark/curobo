@@ -10,6 +10,7 @@ Provides runtime compilation of CUDA kernels with the same interface as PyBind11
 from typing import List
 
 # Third Party
+import numpy as np
 import torch
 from cuda.core import LaunchConfig
 
@@ -107,8 +108,8 @@ def launch_line_search(
         current_iteration.data_ptr(),
         converged_global.data_ptr(),
         convergence_iteration,
-        cost_delta_threshold,
-        cost_relative_threshold,
+        np.float32(cost_delta_threshold),
+        np.float32(cost_relative_threshold),
         exploration_cost.data_ptr(),
         exploration_action.data_ptr(),
         exploration_gradient.data_ptr(),
@@ -122,8 +123,8 @@ def launch_line_search(
         search_gradient.data_ptr(),
         step_direction.data_ptr(),
         search_magnitudes.data_ptr(),
-        armijo_threshold_c_1,
-        curvature_threshold_c_2,
+        np.float32(armijo_threshold_c_1),
+        np.float32(curvature_threshold_c_2),
         strong_wolfe,
         approx_wolfe,
         n_linesearch,
@@ -246,7 +247,7 @@ def launch_lbfgs_step(
         x_0.data_ptr(),
         grad_0.data_ptr(),
         grad_q.data_ptr(),
-        epsilon,
+        np.float32(epsilon),
         batch_size,
         history_m,
         v_dim,

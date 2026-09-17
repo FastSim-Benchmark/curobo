@@ -260,6 +260,7 @@ class TestMotionPlannerPlanSinglePose:
         """Failed IK seeds are replaced by a successful solution in place."""
         planner = MotionPlanner.__new__(MotionPlanner)
         planner._destroyed = True
+        planner.config = MotionPlannerCfg(None, None)
         ik_solutions = torch.tensor(
             [[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]]
         )

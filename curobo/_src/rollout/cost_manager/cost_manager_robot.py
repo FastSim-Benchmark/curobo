@@ -236,6 +236,7 @@ class RobotCostManager:
             self.setup_batch_tensors(batch_size, horizon)
         if cost_collection is None:
             cost_collection = CostCollection()
+        first_new_cost = len(cost_collection.names)
 
         # Tool pose
         if self.has_cost("tool_pose") and goal is not None and goal.link_goal_poses is not None:
@@ -250,10 +251,12 @@ class RobotCostManager:
                     cost_collection.add(cost_value, "tool_pose")
 
         if self.has_cost("posture"):
-            with self._stream_context("posture"):
-                cost_collection.add(
-                    self.get_cost("posture").forward(state.joint_state.position), "posture"
-                )
+            posture_cost = self.get_cost("posture")
+            if posture_cost.enabled:
+                with self._stream_context("posture"):
+                    cost_collection.add(
+                        posture_cost.forward(state.joint_state.position), "posture"
+                    )
 
         # Independent axis hold
         if self.has_cost("axis_hold"):
@@ -307,7 +310,13 @@ class RobotCostManager:
                     )
                     cost_collection.add(cost_value, "scene_collision")
 
-        synchronize_cuda_streams(self._costs_events, self.device_cfg.device)
+        # An inactive cost may retain an event recorded inside a discarded
+        # CUDA graph. Join only streams that produced costs in this evaluation.
+        executed_events = {
+            name: self._costs_events[name]
+            for name in cost_collection.names[first_new_cost:]
+        }
+        synchronize_cuda_streams(executed_events, self.device_cfg.device)
         return cost_collection
 
     # -- Compute convergence --

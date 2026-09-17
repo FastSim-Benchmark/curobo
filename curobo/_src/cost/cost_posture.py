@@ -24,6 +24,7 @@ class PostureCost(BaseCost):
         self.tolerance = torch.ones(dof, device=self.device_cfg.device)
         self.active = torch.zeros(1, device=self.device_cfg.device)
         self.hold_weight = PATH_CONSTRAINT_PRIORITY if float(config.weight.max()) > 1 else 1.0
+        self.disable_cost()
 
     def configure(
         self,
@@ -43,6 +44,12 @@ class PostureCost(BaseCost):
         self.start.copy_(start)
         self.tolerance.copy_(tolerance)
         self.active.fill_(1)
+        self.enable_cost()
+
+    def deactivate(self) -> None:
+        """Remove this request's residual from ordinary Cartesian rollouts."""
+        self.active.zero_()
+        self.disable_cost()
 
     def forward(self, position: torch.Tensor) -> torch.Tensor:
         """Evaluate terminal goal-set and all-waypoint hold residuals."""

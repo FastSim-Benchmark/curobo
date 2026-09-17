@@ -11,10 +11,12 @@ This module provides:
 from __future__ import annotations
 
 # Standard Library
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import List, Optional, Union
 
 # Third Party
+import torch
 import warp as wp
 
 # CuRobo
@@ -390,6 +392,103 @@ class SceneData:
         if obstacle_data is None:
             log_and_raise(f"Obstacle '{name}' not found in environment {env_idx}")
         obstacle_data.update_pose(name, w_obj_pose=pose, env_idx=env_idx)
+
+    def update_obstacle_poses(
+        self, names: Sequence[str], poses: Pose, env_idx: int = 0
+    ) -> None:
+        """Update named obstacle poses together without rebuilding geometry.
+
+        All names, tensor metadata and values are checked before any storage is
+        written. World poses must have position ``(N, 3)`` and unit quaternion
+        ``(N, 4)`` tensors on the storage device and dtype. Quaternion squared
+        norms may differ from one by at most ``1e-5``. Empty batches are valid.
+        Disabled obstacles can move without being enabled. Names must be unique
+        and unambiguous across cuboid, mesh and voxel storage in the environment.
+
+        The caller must serialize this method with queries and other updates.
+        Value validation synchronizes the input device, so call outside CUDA
+        graph capture; existing query graphs retain their storage addresses.
+        As with scalar pose updates, the CPU ``scene_model`` is not changed.
+        Runtime/device errors after writes start require discarding the owner;
+        this method does not provide transactional rollback for device failures.
+
+        Args:
+            names: Existing obstacle names in input pose order.
+            poses: New poses in world coordinates, without batch broadcasting.
+            env_idx: Environment containing every named obstacle.
+
+        Raises:
+            ValueError: If any name, environment, shape, dtype, device or pose
+                value is invalid. These errors occur before any pose is written.
+        """
+        if type(env_idx) is not int or not 0 <= env_idx < self.num_envs:
+            log_and_raise("invalid obstacle pose update environment")
+        if isinstance(names, (str, bytes)) or not isinstance(names, Sequence):
+            log_and_raise("obstacle pose names must be a sequence")
+        names = tuple(names)
+        if any(not isinstance(name, str) or not name for name in names):
+            log_and_raise("obstacle pose names must be nonempty strings")
+        if len(set(names)) != len(names):
+            log_and_raise("obstacle pose names must be unique")
+        if not isinstance(poses, Pose):
+            log_and_raise("obstacle poses must be a Pose")
+        position, quaternion = poses.position, poses.quaternion
+        if (
+            not isinstance(position, torch.Tensor)
+            or not isinstance(quaternion, torch.Tensor)
+            or position.shape != (len(names), 3)
+            or quaternion.shape != (len(names), 4)
+        ):
+            log_and_raise("obstacle pose tensors must have shapes (N, 3) and (N, 4)")
+        storages = self.get_valid_data()
+        expected = storages[0].inv_pose if storages else self.device_cfg
+        if (
+            position.device != expected.device or quaternion.device != expected.device
+            or position.dtype != expected.dtype or quaternion.dtype != expected.dtype
+            or not position.is_floating_point()
+        ):
+            log_and_raise("obstacle pose tensors must match storage device and dtype")
+        if not names:
+            return
+        # Rebuild the CPU index from current storage, including after removals
+        # compact slots or a scene reload changes their assignment.
+        locations = {}
+        for storage_index, storage in enumerate(storages):
+            if (
+                storage.inv_pose.device != position.device
+                or storage.inv_pose.dtype != position.dtype
+            ):
+                log_and_raise("obstacle pose storage must share device and dtype")
+            for slot, name in enumerate(storage.names[env_idx]):
+                if name is not None:
+                    locations.setdefault(name, []).append((storage_index, slot))
+        grouped = {}
+        for source, name in enumerate(names):
+            matches = locations.get(name, ())
+            if len(matches) != 1:
+                log_and_raise(f"Obstacle '{name}' missing or ambiguous in environment {env_idx}")
+            storage_index, slot = matches[0]
+            slots, sources = grouped.setdefault(storage_index, ([], []))
+            slots.append(slot)
+            sources.append(source)
+        valid = (
+            torch.isfinite(position).all() & torch.isfinite(quaternion).all()
+            & ((quaternion.square().sum(dim=-1) - 1.0).abs() <= 1.0e-5).all()
+        )
+        if not bool(valid):
+            log_and_raise("obstacle poses must be finite with unit quaternions")
+        inverse = Pose(position.contiguous(), quaternion.contiguous()).inverse().get_pose_vector()
+        if not bool(torch.isfinite(inverse).all()):
+            log_and_raise("inverse obstacle poses must be finite")
+        updates = []
+        for storage_index, (slots, sources) in grouped.items():
+            slot_index = torch.tensor(slots, device=position.device, dtype=torch.long)
+            source_index = torch.tensor(sources, device=position.device, dtype=torch.long)
+            updates.append((storages[storage_index], slot_index, inverse[source_index]))
+        for storage, slots, values in updates:
+            # Advanced-index assignment writes the original tensor. Calling
+            # copy_() on the indexed result would only modify a temporary copy.
+            storage.inv_pose[env_idx, slots, :7] = values
 
     def enable_obstacle(
         self,

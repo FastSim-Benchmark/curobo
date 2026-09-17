@@ -60,6 +60,11 @@ __global__ void kernel_lbfgs_step(
   curobo::optimization::lbfgs::update_rho_buffer(
       batch, threadIdx.x, batchsize, effective_m, numerator, stable_mode, rho_buffer);
 
+  // History is written per coordinate, while rho is written by one warp.
+  // Every warp must observe this iteration's coefficients before loading them
+  // in the first two-loop pass; the pass's later reduction is too late.
+  __syncthreads();
+
   ////////////////////
   // L-BFGS two-loop algorithm
   ////////////////////

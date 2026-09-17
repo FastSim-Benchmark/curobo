@@ -174,17 +174,18 @@ class LBFGSOpt:
         opt_dim = rollout_list[0].action_horizon * rollout_list[0].action_dim
         shared_memory_needed = (((2 * opt_dim) + 2) * config.history + 32 + 1) * 4
         max_shared_memory = 65536
-        if opt_dim >= 1024 or config.history > 31 or shared_memory_needed > max_shared_memory:
-            if shared_memory_needed > max_shared_memory:
-                log_info(
-                    f"LBFGS: Not using CUDA kernel - shared memory requirement "
-                    f"({shared_memory_needed} bytes) exceeds hardware limit "
-                    f"({max_shared_memory} bytes) for opt_dim={opt_dim}, "
-                    f"history={config.history}"
-                )
-            else:
-                log_info("LBFGS: Not using LBFGS Cuda Kernel as opt_dim>=1024 or history>31")
+        if opt_dim >= 1024 or config.history > 31:
+            log_info("LBFGS: Not using LBFGS Cuda Kernel as opt_dim>=1024 or history>31")
             config.use_cuda_kernel_step_direction = False
+        elif shared_memory_needed > max_shared_memory:
+            # The fused global-memory kernel only stores alpha in shared
+            # memory. A large history must not force eager two-loop dispatch.
+            config.use_cuda_kernel_shared_buffers = False
+            if config.use_cuda_kernel_step_direction:
+                log_info(
+                    f"LBFGS: Using global-memory CUDA kernel for opt_dim={opt_dim}, "
+                    f"history={config.history}; shared history needs {shared_memory_needed} bytes"
+                )
 
         if config.history > opt_dim:
             log_info("LBFGS: history >= opt_dim, reducing history to opt_dim-1")

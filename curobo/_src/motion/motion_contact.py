@@ -101,8 +101,11 @@ def capture_contact(
             eligible[ids] = True
     cuboids = scene.data.cuboids
     contacts = []
+    # Freeze the small enable mask once. Reading one CUDA scalar per reserved
+    # slot synchronizes thousands of times even when almost all slots are empty.
+    enabled_cuboids = [] if cuboids is None else cuboids.enable[0].tolist()
     for index, name in enumerate(cuboids.names[0] if cuboids is not None else ()):
-        if not bool(cuboids.enable[0, index].item()):
+        if not bool(enabled_cuboids[index]):
             continue
         inverse = cuboids.inv_pose[0, index, :7]
         rotation = Pose(position=inverse[:3], quaternion=inverse[3:]).get_rotation_matrix()[0]
