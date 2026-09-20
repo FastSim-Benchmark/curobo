@@ -65,7 +65,7 @@ class AttachmentManager:
         obstacles: List[Obstacle],
         num_spheres: Optional[int] = None,
         surface_radius: float = 0.002,
-        sphere_fit_type: SphereFitType = SphereFitType.MORPHIT,
+        sphere_fit_type: SphereFitType = SphereFitType.FAST,
     ) -> torch.Tensor:
         """Fit spheres to obstacle geometry. Expensive; call once, reuse across envs.
 
@@ -186,7 +186,7 @@ class AttachmentManager:
         link_name: str = "attached_object",
         num_spheres: Optional[int] = None,
         surface_radius: float = 0.002,
-        sphere_fit_type: SphereFitType = SphereFitType.MORPHIT,
+        sphere_fit_type: SphereFitType = SphereFitType.FAST,
         world_objects_pose_offset: Optional[Pose] = None,
         disable_obstacle_names: Optional[List[str]] = None,
     ) -> None:
@@ -230,7 +230,7 @@ class AttachmentManager:
         link_name: str = "attached_object",
         num_spheres: Optional[int] = None,
         surface_radius: float = 0.002,
-        sphere_fit_type: SphereFitType = SphereFitType.MORPHIT,
+        sphere_fit_type: SphereFitType = SphereFitType.FAST,
         world_objects_pose_offset: Optional[Pose] = None,
     ) -> None:
         """Attach obstacles that already exist in the scene, looked up by name.

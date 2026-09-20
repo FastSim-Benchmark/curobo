@@ -27,7 +27,7 @@ Example:
 
         mesh = trimesh.load("link.obj")
         n = estimate_sphere_count(mesh)
-        result = fit_spheres_to_mesh(mesh, n_spheres=n, fit_type=SphereFitType.VOXEL)
+        result = fit_spheres_to_mesh(mesh, num_spheres=n, fit_type=SphereFitType.VOXEL)
         centers, radii, metrics = result.centers, result.radii, result.metrics
 """
 from curobo._src.geom.sphere_fit.fit_spheres import fit_spheres_to_mesh

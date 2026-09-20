@@ -255,7 +255,7 @@ class RobotBuilder:
         self,
         sphere_density: float = 1.0,
         surface_radius: float = 0.002,
-        fit_type: SphereFitType = SphereFitType.MORPHIT,
+        fit_type: SphereFitType = SphereFitType.FAST,
         use_collision_mesh: bool = False,
         iterations: int = 200,
         coverage_weight: Optional[float] = None,
@@ -276,8 +276,8 @@ class RobotBuilder:
             surface_radius: Radius added to surface-sampled spheres.  Only
                 affects the ``SURFACE`` fit type and the surface-sampling
                 fallback.
-            fit_type: Sphere fitting algorithm.  ``MORPHIT`` (default) usually
-                gives the best results.
+            fit_type: Sphere fitting algorithm. FAST (default) uses a bounded
+                CPU fit. Explicit legacy methods remain available.
             use_collision_mesh: When True, use collision geometry instead of
                 visual geometry.
             iterations: Optimization iterations for the ``MORPHIT`` fit type.
@@ -350,7 +350,7 @@ class RobotBuilder:
         num_spheres: Optional[int] = None,
         sphere_density: float = 1.0,
         surface_radius: float = 0.002,
-        fit_type: SphereFitType = SphereFitType.MORPHIT,
+        fit_type: SphereFitType = SphereFitType.FAST,
         use_collision_mesh: bool = False,
         iterations: int = 200,
         coverage_weight: Optional[float] = None,
@@ -875,7 +875,7 @@ class RobotBuilder:
         num_spheres: Optional[int] = None,
         sphere_density: float = 1.0,
         surface_radius: float = 0.002,
-        fit_type: SphereFitType = SphereFitType.MORPHIT,
+        fit_type: SphereFitType = SphereFitType.FAST,
         use_collision_mesh: bool = False,
         iterations: int = 200,
         coverage_weight: Optional[float] = None,

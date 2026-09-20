@@ -316,7 +316,7 @@ class Obstacle:
         self,
         num_spheres: Optional[int] = None,
         surface_radius: float = 0.002,
-        fit_type: SphereFitType = SphereFitType.MORPHIT,
+        fit_type: SphereFitType = SphereFitType.FAST,
         pre_transform_pose: Optional[Pose] = None,
         device_cfg: DeviceCfg = DeviceCfg(),
     ) -> List[Sphere]:

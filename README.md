@@ -2,6 +2,19 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # cuRobo
 
+## Default sphere fitting in this fork
+
+Fork version `0.8.0.post1.dev58` introduces the FAST default and clipping
+precision fixes below. Package versions continue to follow Git via setuptools-scm.
+
+New sphere fits use `SphereFitType.FAST`: a CPU preprocessing pipeline with a
+default budget of 32 spheres, finite-view silhouette constraints, and conditional
+CoACD decomposition. It allows filled cavities and local coverage gaps; it is
+not a conservative enclosure. Existing saved sphere configurations are unchanged.
+Select `SphereFitType.MORPHIT`, `VOXEL`, or `SURFACE` explicitly to retain a legacy
+method. Shared clipping and output device/dtype conversion still apply.
+See [sphere fitting](docs/reference/sphere_fitting.rst) for budgets and diagnostics.
+
 *CUDA Accelerated Robot Library*
 
 **[Documentation](https://nvlabs.github.io/curobo) | [Paper](https://arxiv.org/abs/2603.05493)**

@@ -19,15 +19,17 @@ classifiers = [
     "Intended Audience :: Developers",
     "Natural Language :: English",
     "Programming Language :: Python :: 3",
-    "Topic :: Scientific/Engineering :: Robotics",
+    "Topic :: Scientific/Engineering",
 ]
 
 dependencies = [
+    "coacd>=1.0.7,<2",
     "importlib_resources",
     "matplotlib",
     "networkx",
     "numpy",
     "numpy-quaternion",
+    "opencv-python-headless>=4.8,<5",
     "pyyaml",
     "scipy>=1.7.0",
     "setuptools_scm>=6.2",

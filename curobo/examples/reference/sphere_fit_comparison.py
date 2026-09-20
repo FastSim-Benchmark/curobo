@@ -50,6 +50,7 @@ from curobo.sphere_fit import (
 METHOD_COLORS: Dict[SphereFitType, Tuple[int, int, int]] = {
     SphereFitType.SURFACE: (30, 144, 255),                # dodger blue
     SphereFitType.VOXEL: (50, 205, 50),                  # lime green
+    SphereFitType.FAST: (255, 165, 0),
     SphereFitType.MORPHIT: (255, 105, 180),              # hot pink
 }
 
@@ -173,7 +174,7 @@ def main():
     parser.add_argument(
         "--methods", nargs="*", default=None,
         help="Fit methods to compare (e.g. sample_surface voxel_volume morphit). "
-             "Default: all except MORPHIT (add 'morphit' explicitly to include it).",
+             "Default: all four fitting methods.",
     )
     parser.add_argument("--port", type=int, default=8080, help="Viser server port")
     parser.add_argument("--num-spheres", type=int, default=0,
@@ -194,6 +195,7 @@ def main():
                 log_warn(f"Unknown fit type '{name}', skipping")
     else:
         fit_types = [
+            SphereFitType.FAST,
             SphereFitType.SURFACE,
             SphereFitType.VOXEL,
             SphereFitType.MORPHIT,

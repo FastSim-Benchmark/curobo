@@ -30,6 +30,8 @@ class SphereFitType(Enum):
     VOXEL = "voxel"
     #: Voxel-grid seeding + Adam optimization.
     MORPHIT = "morphit"
+    #: Budgeted visual-hull fitting with conditional convex decomposition.
+    FAST = "fast"
 
 
 @dataclass

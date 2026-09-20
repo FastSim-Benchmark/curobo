@@ -58,7 +58,7 @@ class TestSphereFitType:
     def test_sphere_fit_type_count(self):
         """Test that we have the expected number of fit types."""
         fit_types = list(SphereFitType)
-        assert len(fit_types) == 3
+        assert len(fit_types) == 4
 
 
 class TestSampleEvenFitMesh:
@@ -200,8 +200,10 @@ class TestFitSpheresToMesh:
         assert result.num_spheres > 0
 
     def test_fit_spheres_large_count(self, large_cuboid_mesh):
-        """Test fitting large number of spheres."""
-        result = fit_spheres_to_mesh(large_cuboid_mesh, 100, 0.01)
+        """Test the retained legacy method with a large requested count."""
+        result = fit_spheres_to_mesh(
+            large_cuboid_mesh, 100, 0.01, fit_type=SphereFitType.MORPHIT
+        )
 
         assert result.centers is not None
         assert result.num_spheres > 0
@@ -503,4 +505,3 @@ class TestSphereFitIntegration:
             assert result.centers is not None, f"Failed for {shape.name}"
             assert result.num_spheres > 0, f"No points for {shape.name}"
             assert len(result.radii) == result.num_spheres, f"Mismatch for {shape.name}"
-

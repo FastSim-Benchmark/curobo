@@ -87,9 +87,13 @@ def _build_bbox_grid(mesh: trimesh.Trimesh, num_spheres: int) -> np.ndarray:
     ny = max(int(np.ceil(extents[1] / pitch)), 1)
     nz = max(int(np.ceil(extents[2] / pitch)), 1)
 
-    xs = np.linspace(lo[0] + pitch / 2, hi[0] - pitch / 2, nx)
-    ys = np.linspace(lo[1] + pitch / 2, hi[1] - pitch / 2, ny)
-    zs = np.linspace(lo[2] + pitch / 2, hi[2] - pitch / 2, nz)
+    # A thin axis with one cell must sample its midpoint; using the full
+    # isotropic pitch can put every seed outside the mesh. Preserve the
+    # existing sampling coordinates on axes that have multiple cells.
+    inset = np.minimum(extents, pitch) / 2
+    xs = np.linspace(lo[0] + inset[0], hi[0] - inset[0], nx)
+    ys = np.linspace(lo[1] + inset[1], hi[1] - inset[1], ny)
+    zs = np.linspace(lo[2] + inset[2], hi[2] - inset[2], nz)
 
     grid = np.stack(np.meshgrid(xs, ys, zs, indexing="ij"), axis=-1)
     return grid.reshape(-1, 3)
@@ -142,5 +146,3 @@ def voxel_fit_mesh(
         rad = rad[:num_spheres]
 
     return pts, rad
-
-

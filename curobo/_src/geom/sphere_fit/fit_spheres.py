@@ -53,25 +53,43 @@ def _apply_clip_plane(
 ) -> None:
     """Discard or shrink spheres that cross a half-plane boundary.
 
-    Spheres whose centers are behind the plane (within *buffer*) are removed.
-    Remaining spheres have their radii clamped so they don't protrude past
-    the plane minus *buffer*.  Modifies *result* in place.
+    Centers on or behind the buffered plane (offset plus *buffer*) are removed.
+    Remaining radii are clamped to that boundary. Modifies *result* in place.
     """
     normal = numpy.array(clip_plane[0], dtype=numpy.float64)
     normal = normal / numpy.linalg.norm(normal)
     offset = float(clip_plane[1])
 
-    signed_dist = result.centers @ normal - offset
-    keep = signed_dist > buffer
+    clearance = result.centers @ normal - (offset + buffer)
+    keep = clearance > 0.0
     if not numpy.all(keep):
         result.centers = result.centers[keep]
         result.radii = result.radii[keep]
         result.num_spheres = len(result.centers)
-        signed_dist = signed_dist[keep]
+        clearance = clearance[keep]
 
     if result.num_spheres > 0:
-        max_radii = numpy.maximum(signed_dist - buffer, 1e-4)
+        max_radii = numpy.maximum(clearance, 0.0)
         result.radii = numpy.minimum(result.radii, max_radii)
+
+
+def _preserve_clip_plane_precision(result: SphereFitResult, clip_plane: tuple) -> None:
+    """Keep the half-plane bound after centers and radii change precision."""
+    normal = torch.as_tensor(clip_plane[0], dtype=torch.float64, device=result.centers.device)
+    normal = normal / torch.linalg.vector_norm(normal)
+    distance = result.centers.to(torch.float64) @ normal - (float(clip_plane[1]) + 0.02)
+    radii = torch.minimum(result.radii.to(torch.float64), distance).to(result.radii.dtype)
+    # Nearest rounding can cross the bound. Choose the adjacent interior value
+    # only in that case, rather than adding a geometric clearance or tolerance.
+    radii = torch.where(
+        radii.to(torch.float64) > distance,
+        torch.nextafter(radii, torch.zeros_like(radii)),
+        radii,
+    )
+    keep = (distance > 0) & (radii > 0)
+    result.centers = result.centers[keep].contiguous()
+    result.radii = radii[keep].contiguous()
+    result.num_spheres = len(result.radii)
 
 
 def fit_spheres_to_mesh(
@@ -79,7 +97,7 @@ def fit_spheres_to_mesh(
     num_spheres: Optional[int] = None,
     sphere_density: float = 1.0,
     surface_radius: float = 0.005,
-    fit_type: SphereFitType = SphereFitType.MORPHIT,
+    fit_type: SphereFitType = SphereFitType.FAST,
     iterations: int = 200,
     compute_metrics: bool = False,
     coverage_weight: Optional[float] = None,
@@ -91,15 +109,16 @@ def fit_spheres_to_mesh(
 
     Args:
         mesh: Input mesh.
-        num_spheres: Explicit number of spheres to fit.  When ``None`` (default),
-            estimated automatically using *sphere_density*.
+        num_spheres: Sphere budget. FAST accepts integers in [1, 256] and may
+            return fewer spheres. When None, FAST uses ceil(32*sphere_density),
+            clamped to [1, 256]; legacy methods use their volume-based estimate.
         sphere_density: Dimensionless density multiplier used when *num_spheres*
             is ``None``.  Scales both the sphere count estimate and the
             per-link cap.  ``1.0`` (default) gives a balanced count; ``2.0``
             doubles it; ``0.5`` halves it.  Practical range: ``0.1`` -- ``10.0``.
         surface_radius: Radius added to surface-sampled spheres.  Only affects
             the ``SURFACE`` fit type and the surface-sampling fallback.
-        fit_type: Fitting algorithm; see :class:`SphereFitType`.
+        fit_type: Fitting algorithm, FAST by default; see :class:`SphereFitType`.
         iterations: Optimization iterations (only used by ``MORPHIT``).
         compute_metrics: When True, compute quality metrics (coverage,
             protrusion, surface gap, volume ratio) on the result.
@@ -114,6 +133,7 @@ def fit_spheres_to_mesh(
             during MorphIt optimization and hard-clamped afterwards.  For
             non-MorphIt fit types, only the hard clamp is applied.  ``None``
             (default) disables clipping.
+        device_cfg: Device and floating-point dtype for the returned spheres.
 
     Returns:
         A :class:`SphereFitResult` with sphere positions, radii, and
@@ -122,25 +142,39 @@ def fit_spheres_to_mesh(
     requested_n_spheres = num_spheres
     used_convex_hull = False
 
-    if fit_type != SphereFitType.SURFACE and _is_hollow_mesh(mesh):
+    if fit_type in (SphereFitType.VOXEL, SphereFitType.MORPHIT) and _is_hollow_mesh(mesh):
         log_info("sphere_fit: hollow/thin mesh detected, using convex hull")
         mesh = mesh.convex_hull
         used_convex_hull = True
 
     auto_mode = num_spheres is None
     if auto_mode:
-        num_spheres = estimate_sphere_count(mesh, sphere_density=sphere_density)
+        if fit_type == SphereFitType.FAST:
+            if not numpy.isfinite(sphere_density) or sphere_density <= 0:
+                raise ValueError("FAST sphere_density must be positive and finite")
+            num_spheres = max(1, int(numpy.ceil(32 * min(float(sphere_density), 8.0))))
+        else:
+            num_spheres = estimate_sphere_count(mesh, sphere_density=sphere_density)
         log_info(f"sphere_fit: auto num_spheres={num_spheres}")
 
     n_pts = n_radius = None
     history = []
     fallback_used = False
+    fast_diagnostics = None
 
     t0 = time.time()
 
     device = device_cfg.device
 
-    if fit_type == SphereFitType.SURFACE:
+    if fit_type == SphereFitType.FAST:
+        # Lazy import keeps explicitly selected legacy backends independent.
+        from curobo._src.geom.sphere_fit.fit_fast import fast_fit_mesh
+
+        if isinstance(num_spheres, bool) or not isinstance(num_spheres, (int, numpy.integer)):
+            raise ValueError("FAST num_spheres must be an integer budget in [1, 256]")
+        n_pts, n_radius, fast_diagnostics = fast_fit_mesh(mesh, num_spheres)
+
+    elif fit_type == SphereFitType.SURFACE:
         n_pts, n_radius = sample_even_fit_mesh(mesh, num_spheres, surface_radius)
 
     elif fit_type == SphereFitType.VOXEL:
@@ -204,6 +238,9 @@ def fit_spheres_to_mesh(
         },
     )
 
+    if fast_diagnostics is not None:
+        result.debug_info["fast"] = fast_diagnostics
+
     if clip_plane is not None and result.num_spheres > 0:
         _apply_clip_plane(result, clip_plane)
 
@@ -213,6 +250,9 @@ def fit_spheres_to_mesh(
     result.radii = torch.as_tensor(
         result.radii, dtype=device_cfg.dtype, device=device
     ).contiguous()
+
+    if clip_plane is not None and result.num_spheres > 0:
+        _preserve_clip_plane_precision(result, clip_plane)
 
     if compute_metrics:
         populate_metrics(result, mesh, device=device)

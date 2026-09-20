@@ -17,7 +17,7 @@ to a YAML or XRDF config file consumed by every downstream cuRobo module
 By the end of this tutorial you will have:
 
 - Created a cuRobo robot configuration from a URDF file
-- Fitted collision spheres to each link mesh using the MorphIt optimizer
+- Fitted collision spheres to each link mesh using the FAST fitter
 - Computed an optimized self-collision ignore matrix
 - Inspected per-link sphere fit quality metrics
 - Visualized the fitted spheres in a browser
@@ -91,8 +91,8 @@ Step 4: Understand the pipeline
 The builder runs three stages:
 
 1. **Sphere fitting**: Each link mesh is approximated by a set of spheres
-   using the MorphIt optimizer (an Adam-based iterative fit that balances
-   interior *coverage* against surface *protrusion*). The ``--sphere-density``
+   using FAST by default (budgeted fitting with silhouette constraints).
+   Select ``--fit-type morphit`` for the legacy Adam-based optimizer. The ``--sphere-density``
    multiplier controls how many spheres are allocated per link.
 
 2. **Self-collision matrix**: Link pairs that are always in collision (e.g.
@@ -107,7 +107,7 @@ The builder runs three stages:
 Step 5: Tuning (advanced)
 ---------------------------
 
-- ``--coverage-weight`` / ``--protrusion-weight`` control the MorphIt loss
+- With ``--fit-type morphit``, ``--coverage-weight`` / ``--protrusion-weight`` control the loss
   balance. Raise ``coverage-weight`` (default 1000) for tighter volume
   filling; raise ``protrusion-weight`` (default 10) to reduce overshoot.
 - ``--sphere-density 2.0`` doubles the sphere budget per link.
@@ -118,8 +118,8 @@ Step 5: Tuning (advanced)
   extending below ``z=0`` in link-local coordinates.  This is useful when the
   robot is mounted on a stand or bolted to the floor -- without clipping, the
   base link spheres may overlap the mounting surface and cause perpetual
-  collisions.  The constraint is enforced as both a differentiable MorphIt
-  loss and a hard post-fit clamp.  Can be repeated for multiple links.
+  collisions.  All methods apply a hard post-fit clamp; MorphIt also applies a
+  differentiable loss during optimization.  Can be repeated for multiple links.
 """
 
 import argparse
@@ -133,6 +133,7 @@ import torch
 from curobo.content import get_assets_path
 from curobo.logging import setup_logger
 from curobo.robot_builder import RobotBuilder
+from curobo.sphere_fit import SphereFitType
 
 
 def build_new_robot(args):
@@ -157,6 +158,7 @@ def build_new_robot(args):
     print("\nFitting collision spheres...")
     builder.fit_collision_spheres(
         sphere_density=args.sphere_density,
+        fit_type=SphereFitType(args.fit_type),
         coverage_weight=args.coverage_weight,
         protrusion_weight=args.protrusion_weight,
         compute_metrics=args.compute_metrics,
@@ -253,6 +255,7 @@ def edit_existing_robot(args):
         new_spheres = builder.refit_link_spheres(
             args.refit_link,
             sphere_density=args.sphere_density,
+            fit_type=SphereFitType(args.fit_type),
         )
         print(f"Fitted {len(new_spheres)} spheres to {args.refit_link}")
 
@@ -328,6 +331,7 @@ def test():
             export_xrdf=False,
             tool_frames=[],
             sphere_density=1.0,
+            fit_type="fast",
             coverage_weight=None,
             protrusion_weight=None,
             compute_metrics=True,
@@ -375,6 +379,7 @@ def test():
             export_xrdf=False,
             tool_frames=[],
             sphere_density=1.0,
+            fit_type="fast",
             coverage_weight=None,
             protrusion_weight=None,
             compute_metrics=False,
@@ -403,6 +408,7 @@ def test():
             export_xrdf=False,
             tool_frames=[],
             sphere_density=1.0,
+            fit_type="fast",
             coverage_weight=None,
             protrusion_weight=None,
             compute_metrics=False,
@@ -476,6 +482,8 @@ def main():
     )
 
     # Sphere fitting arguments
+    parser.add_argument("--fit-type", choices=[fit.value for fit in SphereFitType],
+                        default="fast", help="Sphere fitting algorithm (default: fast)")
     parser.add_argument(
         "--sphere-density",
         type=float,
