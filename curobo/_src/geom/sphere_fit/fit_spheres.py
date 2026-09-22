@@ -73,11 +73,13 @@ def _apply_clip_plane(
         result.radii = numpy.minimum(result.radii, max_radii)
 
 
-def _preserve_clip_plane_precision(result: SphereFitResult, clip_plane: tuple) -> None:
+def _preserve_clip_plane_precision(
+    result: SphereFitResult, clip_plane: tuple, buffer: float = 0.02,
+) -> None:
     """Keep the half-plane bound after centers and radii change precision."""
     normal = torch.as_tensor(clip_plane[0], dtype=torch.float64, device=result.centers.device)
     normal = normal / torch.linalg.vector_norm(normal)
-    distance = result.centers.to(torch.float64) @ normal - (float(clip_plane[1]) + 0.02)
+    distance = result.centers.to(torch.float64) @ normal - (float(clip_plane[1]) + buffer)
     radii = torch.minimum(result.radii.to(torch.float64), distance).to(result.radii.dtype)
     # Nearest rounding can cross the bound. Choose the adjacent interior value
     # only in that case, rather than adding a geometric clearance or tolerance.
@@ -104,6 +106,7 @@ def fit_spheres_to_mesh(
     protrusion_weight: Optional[float] = None,
     clip_plane: Optional[tuple] = None,
     device_cfg: DeviceCfg = DeviceCfg(),
+    max_bottom_protrusion_m: Optional[float] = None,
 ) -> SphereFitResult:
     """Approximate a mesh with spheres.
 
@@ -134,11 +137,26 @@ def fit_spheres_to_mesh(
             non-MorphIt fit types, only the hard clamp is applied.  ``None``
             (default) disables clipping.
         device_cfg: Device and floating-point dtype for the returned spheres.
+        max_bottom_protrusion_m: Optional nonnegative bound below the mesh's
+            minimum local Z. Hard-clamps sphere radii without moving centers,
+            removes spheres entirely below the bound, and preserves the bound
+            after dtype conversion. Metrics describe the final clipped spheres.
+            This is an object-local plane, not a world-gravity constraint.
 
     Returns:
         A :class:`SphereFitResult` with sphere positions, radii, and
         optionally quality metrics.
     """
+    bottom_plane = None
+    if max_bottom_protrusion_m is not None:
+        if (isinstance(max_bottom_protrusion_m, bool)
+                or not numpy.isfinite(max_bottom_protrusion_m)
+                or max_bottom_protrusion_m < 0):
+            raise ValueError("max_bottom_protrusion_m must be finite and nonnegative")
+        vertices = numpy.asarray(mesh.vertices)
+        if vertices.size == 0 or not numpy.isfinite(vertices).all():
+            raise ValueError("bottom-plane constraint requires a finite nonempty mesh")
+        bottom_plane = ((0.0, 0.0, 1.0), float(vertices[:, 2].min()) - max_bottom_protrusion_m)
     requested_n_spheres = num_spheres
     used_convex_hull = False
 
@@ -198,6 +216,9 @@ def fit_spheres_to_mesh(
                 device=device,
             )
 
+    if fit_type == SphereFitType.FAST and (n_pts is None or len(n_pts) < 1):
+        raise ValueError("FAST produced no spheres; legacy fitting fallback is disabled")
+
     if (n_pts is None or len(n_pts) < 1) and num_spheres > 0:
         log_warn("sphere_fit: primary method failed, falling back to voxel volume")
         n_pts, n_radius = voxel_fit_mesh(mesh, num_spheres, device=device)
@@ -244,6 +265,9 @@ def fit_spheres_to_mesh(
     if clip_plane is not None and result.num_spheres > 0:
         _apply_clip_plane(result, clip_plane)
 
+    if bottom_plane is not None and result.num_spheres > 0:
+        _apply_clip_plane(result, bottom_plane, buffer=0.0)
+
     result.centers = torch.as_tensor(
         result.centers, dtype=device_cfg.dtype, device=device
     ).contiguous()
@@ -254,6 +278,14 @@ def fit_spheres_to_mesh(
     if clip_plane is not None and result.num_spheres > 0:
         _preserve_clip_plane_precision(result, clip_plane)
 
+    if bottom_plane is not None:
+        if result.num_spheres > 0:
+            _preserve_clip_plane_precision(result, bottom_plane, buffer=0.0)
+        result.debug_info["bottom_plane"] = {
+            "minimum_z_m": bottom_plane[1],
+            "max_bottom_protrusion_m": max_bottom_protrusion_m,
+            "frame": "mesh_local",
+        }
     if compute_metrics:
         populate_metrics(result, mesh, device=device)
 

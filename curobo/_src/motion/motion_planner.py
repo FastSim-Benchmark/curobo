@@ -332,6 +332,7 @@ class MotionPlanner:
         current_state: JointState,
         max_attempts: int,
         enable_graph_attempt: int,
+        posture_seeds=None,
     ) -> Optional[TrajOptSolverResult]:
         """Single-goal planning with retry, seed repair, and graph seeding."""
         trajopt_result = None
@@ -342,10 +343,15 @@ class MotionPlanner:
 
         for current_attempt in range(max_attempts):
             current_state = og_current_state.clone()
+            ik_seed_kwargs = (
+                {"seed_config": posture_seeds.endpoint_seeds(current_attempt)}
+                if posture_seeds is not None else {}
+            )
             ik_result = self.ik_solver.solve_pose(
                 goal_tool_poses,
                 return_seeds=num_seeds,
                 current_state=current_state,
+                **ik_seed_kwargs,
             )
             total_time += ik_result.total_time
             solve_time += ik_result.solve_time
@@ -359,7 +365,10 @@ class MotionPlanner:
                 good_solution = seed_config[ik_result.success][0:1, :].clone()
                 seed_config[~ik_result.success] = good_solution
 
-            seed_traj = None
+            seed_traj = (
+                posture_seeds.trajectory_seeds(goal_tool_poses, seed_config, current_attempt)
+                if posture_seeds is not None else None
+            )
             finetune_attempts = 1
             finetune_dt_scale = 0.55
             if current_attempt >= enable_graph_attempt and self.graph_planner is not None:
@@ -389,6 +398,12 @@ class MotionPlanner:
                 break
 
         if trajopt_result is not None:
+            if posture_seeds is not None:
+                total_time += posture_seeds.total_time
+                solve_time += posture_seeds.solve_time
+                debug = dict(trajopt_result.debug_info or {})
+                debug["posture_seed_attempts"] = posture_seeds.records
+                trajopt_result.debug_info = debug
             trajopt_result.total_time = total_time
             trajopt_result.solve_time = solve_time
         return trajopt_result
@@ -401,6 +416,7 @@ class MotionPlanner:
         max_attempts: int = 10,
     ) -> Optional[TrajOptSolverResult]:
         """Goalset planning: IK + TrajOpt, no graph seeding."""
+        trajopt_result = None
         for _ in range(max_attempts):
             ik_result = self.ik_solver.solve_pose(
                 goal_tool_poses,
@@ -408,7 +424,9 @@ class MotionPlanner:
                 current_state=current_state,
             )
             if torch.count_nonzero(ik_result.success) == 0:
-                return None
+                # An empty IK batch consumes one attempt, not the entire
+                # request budget. A later seed batch may find a feasible pose.
+                continue
 
             finetune_kwargs = (
                 {} if self.config.trajopt_finetune_attempts is None

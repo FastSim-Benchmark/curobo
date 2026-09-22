@@ -112,3 +112,12 @@ def test_fast_visual_hull_fills_cup_but_keeps_visible_gap():
     mesh = trimesh.util.concatenate([rod, other])
     hull = SilhouetteHull.from_mesh(mesh.vertices, mesh.faces, resolution=32, view_count=8)
     assert hull.distance(np.zeros((1, 3)))[0] > 0.2
+
+
+def test_fast_empty_result_never_falls_back_to_legacy(monkeypatch):
+    import curobo._src.geom.sphere_fit.fit_fast as backend
+    monkeypatch.setattr(backend, "fast_fit_mesh", lambda *_: (None, None, {}))
+    with pytest.raises(ValueError, match="legacy fitting fallback is disabled"):
+        fit_spheres_to_mesh(
+            trimesh.creation.box(), num_spheres=32, device_cfg=DeviceCfg(device="cpu")
+        )

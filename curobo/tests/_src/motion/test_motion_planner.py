@@ -253,6 +253,47 @@ class TestMotionPlannerWarmup:
         assert result is True
 
 
+class TestMotionPlannerGoalsetRetries:
+    """Goalset IK failures consume only the configured bounded retry budget."""
+
+    @pytest.mark.parametrize(
+        "ik_success, max_attempts, expected_calls, succeeds",
+        [([False, True], 3, 2, True), ([False, False, False], 3, 3, False),
+         ([False, True], 1, 1, False)],
+    )
+    def test_empty_ik_attempt_uses_remaining_budget(
+        self, ik_success, max_attempts, expected_calls, succeeds
+    ):
+        """Retry empty IK batches, stop on success, and respect a one-attempt limit."""
+        planner = MotionPlanner.__new__(MotionPlanner)
+        planner._destroyed = True
+        planner.config = MotionPlannerCfg(None, None)
+        calls = []
+        trajectory_calls = []
+
+        def solve_ik(*args, **kwargs):
+            success = ik_success[len(calls)]
+            calls.append(kwargs)
+            return SimpleNamespace(success=torch.tensor([success]), solution=torch.zeros((1, 2)))
+
+        successful_trajectory = SimpleNamespace(success=torch.tensor([True]))
+
+        def solve_trajectory(*args, **kwargs):
+            trajectory_calls.append(kwargs)
+            return successful_trajectory
+
+        planner.ik_solver = SimpleNamespace(solve_pose=solve_ik)
+        planner.trajopt_solver = SimpleNamespace(
+            config=SimpleNamespace(num_seeds=1), solve_pose=solve_trajectory,
+        )
+        result = planner._plan_pose_goalset(
+            object(), JointState.from_position(torch.zeros((1, 2))), max_attempts=max_attempts,
+        )
+        assert len(calls) == expected_calls
+        assert len(trajectory_calls) == int(succeeds)
+        assert result is (successful_trajectory if succeeds else None)
+
+
 class TestMotionPlannerPlanSinglePose:
     """Test MotionPlanner.plan_pose method."""
 

@@ -266,3 +266,14 @@ Individual geometry objects also provide a convenience method for sphere fitting
 
    sph = capsule.get_bounding_spheres(num_spheres=128)
    WorldCfg(spheres=sph).save_world_as_mesh("bounding_spheres.obj")
+
+Object-local bottom bound
+-------------------------
+
+``fit_spheres_to_mesh(..., max_bottom_protrusion_m=0.002)`` optionally limits
+every sphere's lowest local Z to the source mesh minimum Z minus 2 mm. The
+default ``None`` preserves existing behavior. The bound must be finite and
+nonnegative. Radii are clamped and invalid spheres removed; the bound is checked
+again after output dtype conversion. Quality metrics describe the clipped result.
+This is not a coverage guarantee or a world-gravity constraint after rotation.
+FAST returns an error for an empty fit; it never falls back to a legacy fitter.

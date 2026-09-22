@@ -133,3 +133,37 @@ def test_posture_departs_mesh_support_and_restores_ordinary_checks(tmp_path):
         ordinary = planner.plan_posture(goals, start, held_joints=("y",), max_attempts=1)
         assert ordinary is not None and not ordinary.success.any()
         assert "selected_constraint_maxima" in ordinary.debug_info
+
+
+def test_posture_retry_projects_waypoints_and_keeps_native_acceptance(monkeypatch):
+    """Exercise the retry branch even when a simple direct path already works."""
+    with MotionPlanner(MotionPlannerCfg.create(
+        "franka.yml", num_ik_seeds=16, num_trajopt_seeds=4, use_cuda_graph=False,
+    )) as planner:
+        names = planner.joint_names
+        start = JointState.from_position(
+            planner.default_joint_state.position.unsqueeze(0), joint_names=names,
+        )
+        goal = start.clone()
+        goal.position[:, 0] += .1
+        solve = planner.trajopt_solver.solve_pose
+        seeded_calls = []
+
+        def reject_first(*args, **kwargs):
+            result = solve(*args, **kwargs)
+            seeded_calls.append(kwargs.get("seed_traj") is not None)
+            if len(seeded_calls) == 1:
+                result.success.fill_(False)
+            return result
+
+        monkeypatch.setattr(planner.trajopt_solver, "solve_pose", reject_first)
+        result = planner.plan_posture(
+            goal, start, free_joints=(names[-1],), held_joints=tuple(names[1:-1]),
+            max_attempts=3,
+        )
+        assert result is not None and result.success.all()
+        assert seeded_calls[0] is False and any(seeded_calls[1:])
+        assert any(row["accepted"] > 0 for row in result.debug_info["posture_seed_attempts"])
+        q = result.get_interpolated_plan().reorder(names).position.reshape(-1, len(names))
+        assert (q[-1, 0] - goal.position[0, 0]).abs() <= .01
+        assert (q[:, 1:-1] - start.position[:, 1:-1]).abs().max() <= 1e-5

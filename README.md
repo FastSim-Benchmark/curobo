@@ -71,6 +71,11 @@ remain invalid.
 
 ## Runtime motion limits
 
+Pose goalset planning honors `max_attempts` when an IK seed batch has no feasible
+solution: it continues with the remaining attempts instead of rejecting the whole
+request immediately. Exhausting the budget without any IK solution returns no
+trajectory. Collision checks and held-joint constraints remain active on every attempt.
+
 `MotionPlanner.update_joint_limits(position=..., velocity=..., acceleration=...,
 jerk=...)` updates named limit tensors of shape `(2, dof)` in place, in the
 planner's joint order. Omitted quantities retain their current values. All inputs
@@ -158,6 +163,17 @@ metres. Captured contact cannot deepen, must clear the support by the endpoint,
 and cannot recur after release. Other pairs retain ordinary collision checks;
 other contact policies are rejected. Mesh queries reuse the current scene BVH.
 The interpolated result is also checked against the declared joint tolerances.
+
+The first attempt retains ordinary endpoint seeding. Subsequent attempts within
+`max_attempts` explore deterministic limit-relative free-joint configurations and
+intermediate posture candidates. Native IK checks intermediate candidates with
+the same axis, held-joint, collision and start-contact constraints. Accepted
+waypoints seed smooth two-leg trajectories for the full native trajectory solve;
+they do not add task actions or relax final acceptance. Sampling is request-local,
+bounded to at most 256 intermediate IK seeds per retry, and does not alter the
+global random generator. Rejected intermediate batches retain endpoint-only
+seeding; all-failed planning still reports failure. The result debug field
+`posture_seed_attempts` records sampled and accepted intermediate counts.
 
 `contact_links` restricts initial-contact capture to spheres on named robot links;
 `None` considers all active spheres. Collision checks for other pairs stay active.

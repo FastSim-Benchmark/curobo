@@ -13,6 +13,7 @@ import torch
 
 from curobo._src.cost.cost_posture import PATH_CONSTRAINT_PRIORITY
 from curobo._src.motion.motion_contact import boundary_contact_scope
+from curobo._src.motion.posture_seeds import PostureSeeds
 from curobo._src.solver.solver_trajopt_result import TrajOptSolverResult
 from curobo._src.state.state_joint import JointState
 from curobo._src.types.axis_hold import AxisHold
@@ -169,14 +170,11 @@ def plan_posture(
             max_initial_penetration,
             contact_links,
         ):
-            result = planner.plan_pose(
-                goals,
-                current_state,
-                max_attempts=max_attempts,
-                enable_graph_attempt=max_attempts,
-                hold_axis=hold_axis,
-                allow_boundary_collision="none",
-            )
+            with planner._hold_axis_scope(hold_axis, current_state):
+                result = planner._plan_pose_single(
+                    goals, current_state, max_attempts, max_attempts,
+                    posture_seeds=PostureSeeds(planner, current_state, positions, mask, held),
+                )
         if result is None:
             return result
         trajectory = result.get_interpolated_plan().reorder(planner.joint_names)
