@@ -167,3 +167,39 @@ def test_posture_retry_projects_waypoints_and_keeps_native_acceptance(monkeypatc
         q = result.get_interpolated_plan().reorder(names).position.reshape(-1, len(names))
         assert (q[-1, 0] - goal.position[0, 0]).abs() <= .01
         assert (q[:, 1:-1] - start.position[:, 1:-1]).abs().max() <= 1e-5
+
+
+def test_posture_preserves_joint_seeds_and_restores_cartesian_lm(monkeypatch):
+    from curobo._src.types.tool_pose import GoalToolPose
+
+    with MotionPlanner(MotionPlannerCfg.create(
+        "franka.yml", num_ik_seeds=16, num_trajopt_seeds=4, use_cuda_graph=False,
+    )) as planner:
+        solver = planner.ik_solver
+        assert solver.config.use_lm_seed
+        calls = []
+        original = solver.seed_ik_solver.solve_single
+
+        def cartesian_seed(*args, **kwargs):
+            calls.append(True)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(solver.seed_ik_solver, "solve_single", cartesian_seed)
+        start = JointState.from_position(
+            planner.default_joint_state.position.unsqueeze(0), joint_names=planner.joint_names,
+        )
+        target = start.clone()
+        target.position[:, 0] += .15
+        result = planner.plan_posture(
+            target, start, free_joints=tuple(planner.joint_names[-3:]), max_attempts=2,
+        )
+        assert result is not None and result.success.all()
+        assert calls == []
+        assert solver.config.use_lm_seed
+        tool = planner.compute_kinematics(start).tool_poses
+        goal = GoalToolPose(
+            tool.tool_frames, tool.position.unsqueeze(3), tool.quaternion.unsqueeze(3),
+        )
+        ordinary = solver.solve_pose(goal, current_state=start, return_seeds=1)
+        assert ordinary.success.all()
+        assert calls == [True]

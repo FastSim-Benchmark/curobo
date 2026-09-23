@@ -37,6 +37,15 @@ class ContactTransfer:
         self.replacement_ids = torch.stack(
             (departure.replacement_ids, arrival.replacement_ids), dim=-1
         ).contiguous()
+        self.replacement_mesh_ids = torch.stack(
+            tuple(
+                contact.replacement_mesh_ids
+                if contact.replacement_mesh_ids is not None
+                else torch.full_like(contact.replacement_ids, -1)
+                for contact in (departure, arrival)
+            ),
+            dim=-1,
+        ).contiguous()
         self.departure = None
         self.arrival = None
         self.shared_start = None

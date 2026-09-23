@@ -24,6 +24,10 @@ if TYPE_CHECKING:
     from curobo._src.geom.collision.collision_scene import SceneCollision
 
 
+class _ContactPenetrationError(ValueError):
+    """A correctly formed endpoint exceeds its bounded contact allowance."""
+
+
 @dataclass(frozen=True)
 class StartContact:
     """One immutable initial-contact declaration for a single-environment query."""
@@ -118,7 +122,7 @@ class ContactSeparation:
         )
         self.initial_clearance = self.clearance(self.initial_spheres)
         if bool((self.initial_clearance < -declaration.max_initial_penetration).any()):
-            log_and_raise(
+            raise _ContactPenetrationError(
                 "StartContact initial penetration exceeds its declared geometry tolerance: "
                 f"{float(-self.initial_clearance.min()):.6f} m > "
                 f"{declaration.max_initial_penetration:.6f} m at {declaration.obstacle_name!r}"

@@ -24,6 +24,7 @@ from curobo._src.geom.types import SceneCfg
 from curobo._src.robot.kinematics.kinematics import KinematicsState
 from curobo._src.rollout.goal_registry import GoalRegistry
 from curobo._src.rollout.metrics import RolloutMetrics
+from curobo._src.solver.ik_diagnostics import ik_failure_diagnostics
 from curobo._src.solver.seed_ik.seed_ik_solver import SeedIKSolver
 from curobo._src.solver.seed_ik.seed_ik_solver_cfg import SeedIKSolverCfg
 from curobo._src.solver.solve_mode import SolveMode
@@ -583,6 +584,25 @@ class IKSolver:
             ),
             solution_state=solution_state,
         )
+
+        if not bool(success.any()):
+            manager = self.metrics_rollout.metrics_constraint_manager
+            config = (
+                manager.get_cost("cspace").config
+                if manager is not None and manager.has_cost("cspace") else None
+            )
+            self_collision_config = (
+                manager.get_cost("self_collision").config.self_collision_kin_config
+                if manager is not None and manager.has_cost("self_collision") else None
+            )
+            ik_result.debug_info["failed_ik"] = ik_failure_diagnostics(
+                metrics_result, feasible_tensor, converged, success, topk_abs_idx, config,
+                self_collision_config=self_collision_config,
+                kinematics_config=(
+                    self.kinematics.config.kinematics_config
+                    if self_collision_config is not None else None
+                ),
+            )
 
         return ik_result
 

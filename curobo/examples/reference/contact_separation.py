@@ -171,6 +171,9 @@ def make_planner(
         num_ik_seeds=8,
         num_trajopt_seeds=4,
         use_cuda_graph=True,
+        # Placement's independent endpoint check also requires 10 micrometers.
+        # A looser IK/TrajOpt goal would let the no-contact baseline stop clear.
+        position_tolerance=1e-5 if placement else 0.005,
         optimizer_collision_activation_distance=(
             max(0.005, approach_clearance) if placement and normal_landing else 0.005
         ),

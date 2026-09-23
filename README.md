@@ -73,8 +73,13 @@ remain invalid.
 
 Pose goalset planning honors `max_attempts` when an IK seed batch has no feasible
 solution: it continues with the remaining attempts instead of rejecting the whole
-request immediately. Exhausting the budget without any IK solution returns no
-trajectory. Collision checks and held-joint constraints remain active on every attempt.
+request immediately. If the joint goalset search finds no successful trajectory,
+it additionally searches individual target groups, at most once per group and
+at most `max_attempts * num_ik_seeds` groups. Each group preserves all tool targets
+at the original goalset index; returned indices still refer to that original set.
+Only successful IK endpoints seed trajectory optimization, and every trajectory
+must pass the normal collision, held-joint and motion-limit checks. Exhausting
+both bounded searches without any IK solution returns no trajectory.
 
 `MotionPlanner.update_joint_limits(position=..., velocity=..., acceleration=...,
 jerk=...)` updates named limit tensors of shape `(2, dof)` in place, in the
@@ -156,7 +161,10 @@ They use equal position bounds during the call, restored on every exit, and a
 separate 1e-5 numerical acceptance threshold independent of terminal tolerance.
 The caller must resolve omitted task variables into held joints. The planner
 uses the native IK/TrajOpt pipeline with a joint goal-set residual; Cartesian
-tracking is disabled for the call and restored afterwards. Axis hold, physical
+tracking and Cartesian LM seed projection are disabled for the call and restored
+afterwards. The LM seeder does not understand joint posture goals; projecting onto
+the dummy current-tool pose would overwrite the sampled posture configurations.
+Axis hold, physical
 limits and collision checks remain active. Start contact supports up to eight static
 cuboids or meshes, with a configurable initial sphere-proxy penetration bound in
 metres. Captured contact cannot deepen, must clear the support by the endpoint,
@@ -177,3 +185,26 @@ seeding; all-failed planning still reports failure. The result debug field
 
 `contact_links` restricts initial-contact capture to spheres on named robot links;
 `None` considers all active spheres. Collision checks for other pairs stay active.
+
+## Terminal support contact
+
+`MotionPlanner.plan_pose` and `plan_cspace` accept `allow_boundary_collision="end"`
+for one static cuboid or mesh support. The captured terminal sphere-model overlap
+must not exceed 2 mm. The trajectory must begin clear and approach the captured
+contact monotonically, without overshoot or rebound; goal IK accepts only the
+captured terminal geometry. Only captured sphere/support pairs use this bounded
+contact rule. Self collision and every other sphere/obstacle pair retain ordinary
+checks, and request-scoped contact declarations are restored after the call.
+Mesh checks use the current scene BVH, including the terminal mesh of an existing
+cuboid-to-mesh `"both"` transfer. Multiple terminal supports remain ambiguous and
+are rejected.
+
+Pose queries with `"end"` or `"both"` bind each target group and kinematic endpoint
+to its own terminal declaration. Deep or ambiguous endpoint candidates are
+rejected before attempting a trajectory. The captured joint state is validated
+again by the complete native IK metrics without re-optimizing it, then seeds
+TrajOpt inside that same contact scope. A failed trajectory continues with the
+remaining candidates and target groups. At most `max_attempts` captured
+candidates are tried per group and at most `max_attempts * num_ik_seeds` groups
+are visited; result diagnostics record the actual attempts and original selected
+goal index. Unrelated solver/model errors still propagate.

@@ -31,7 +31,7 @@ from curobo._src.state.state_joint_trajectory_ops import get_joint_state_at_hori
 from curobo._src.types.axis_hold import AxisHold
 from curobo._src.types.pose import Pose
 from curobo._src.types.tool_pose import GoalToolPose, ToolPose
-from curobo._src.util.logging import log_and_raise
+from curobo._src.util.logging import log_and_raise, log_warn
 
 
 def _axis_string_to_vector(axis: str) -> List[float]:
@@ -268,27 +268,28 @@ class MotionPlanner:
         """Plan to poses with an optional start-referenced axis hold per tool.
 
         Parameters last for this call only. ``allow_boundary_collision`` accepts
-        ``none``, ``start``, ``end``, or ``both`` for bounded static-cuboid endpoint
+        ``none``, ``start``, ``end``, or ``both`` for bounded static mesh/cuboid endpoint
         contacts. Other pairs and self collision retain their ordinary checks.
         ``config.trajopt_finetune_attempts`` controls optional additional
         time-optimal passes without changing initial-solve validation.
         """
         from curobo._src.motion.motion_contact import (
             boundary_contact_scope,
-            contact_goal_seed,
             validate_boundary_mode,
         )
 
         validate_boundary_mode(allow_boundary_collision)
         with self._hold_axis_scope(hold_axis, current_state):
+            if allow_boundary_collision in {"end", "both"}:
+                from curobo._src.motion.motion_contact_goalset import plan_terminal_pose
+
+                return plan_terminal_pose(
+                    self, goal_tool_poses, current_state, use_implicit_goal,
+                    max_attempts, allow_boundary_collision,
+                )
             if allow_boundary_collision != "none":
-                goal_state = None
-                if allow_boundary_collision in {"end", "both"}:
-                    goal_state = contact_goal_seed(self, goal_tool_poses, current_state)
-                    if goal_state is None:
-                        return None
                 with boundary_contact_scope(
-                    self, current_state, goal_state, allow_boundary_collision
+                    self, current_state, None, allow_boundary_collision
                 ):
                     # PRM has ordinary endpoint checks; contact queries use native TrajOpt.
                     return self._plan_pose(
@@ -358,6 +359,20 @@ class MotionPlanner:
 
             success_count = torch.count_nonzero(ik_result.success)
             if success_count == 0:
+                # None remains the native no-endpoint result, but do not lose
+                # the reason when no TrajOpt result exists to carry debug_info.
+                # failed_ik contains aggregate seed counts and bounded selected
+                # joint diagnostics; it does not dump the complete seed batch.
+                diagnostics = (getattr(ik_result, "debug_info", None) or {}).get("failed_ik")
+                candidate_count = (
+                    len(posture_seeds.goals) if posture_seeds is not None
+                    else goal_tool_poses.num_goalset
+                )
+                log_warn(
+                    f"Motion endpoint IK rejected attempt {current_attempt + 1}/{max_attempts}; "
+                    f"posture={posture_seeds is not None}; candidate_count={candidate_count}; "
+                    f"failed_ik={diagnostics}"
+                )
                 continue
 
             seed_config = ik_result.solution
@@ -417,6 +432,7 @@ class MotionPlanner:
     ) -> Optional[TrajOptSolverResult]:
         """Goalset planning: IK + TrajOpt, no graph seeding."""
         trajopt_result = None
+        ik_result = None
         for _ in range(max_attempts):
             ik_result = self.ik_solver.solve_pose(
                 goal_tool_poses,
@@ -441,6 +457,19 @@ class MotionPlanner:
             if torch.count_nonzero(trajopt_result.success) > 0:
                 break
 
+        if trajopt_result is None and ik_result is not None:
+            log_warn(
+                f"Goalset planning exhausted {max_attempts} IK attempts without a successful "
+                f"endpoint; last IK diagnostics: {getattr(ik_result, 'debug_info', None)}"
+            )
+        if trajopt_result is None or not bool(trajopt_result.success.any()):
+            from curobo._src.motion.motion_goalset import plan_goalset_fallback
+
+            fallback = plan_goalset_fallback(
+                self, goal_tool_poses, current_state, use_implicit_goal, max_attempts
+            )
+            if fallback is not None:
+                return fallback
         return trajopt_result
 
     def plan_posture(
@@ -483,7 +512,7 @@ class MotionPlanner:
         """Plan to exact joints, optionally holding a tool axis from the start.
 
         An incompatible joint endpoint fails instead of being retargeted.
-        ``allow_boundary_collision`` selects bounded static-cuboid contacts at
+        ``allow_boundary_collision`` selects bounded static mesh/cuboid contacts at
         ``start``, ``end``, ``both``, or neither (``none``). Request constraints are
         cleared even when planning raises an exception.
         ``config.trajopt_finetune_attempts`` controls optional additional

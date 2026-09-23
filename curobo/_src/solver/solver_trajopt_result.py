@@ -307,12 +307,19 @@ class TrajOptSolverResult(BaseSolverResult):
         total_cost = seed_rollout_cost + smooth_cost  # Combine pose error and dt cost
         total_cost = total_cost.view(batch_size, num_seeds)
 
-        total_cost[~success] += 1e16  # Penalize non-successful trajectories
+        # Rank feasibility separately: adding 1e16 to float32 failed costs
+        # erases their differences and makes topk select an arbitrary failure.
+        cost_order = torch.argsort(total_cost, dim=1, stable=True)
+        ordered_success = torch.gather(success, 1, cost_order)
+        feasibility_order = torch.argsort(
+            ordered_success.to(torch.int32), dim=1, descending=True, stable=True
+        )
+        seed_rank = torch.gather(cost_order, 1, feasibility_order)
+
+        total_cost[~success] += 1e16  # Preserve the reported failure penalty.
 
         # Reshape for topk selection per batch item
         total_cost_reshaped = total_cost.view(batch_size, num_seeds)  # Shape: (batch, num_seeds)
-
-        _, seed_rank = torch.topk(total_cost_reshaped, k=num_seeds, largest=False)
 
         return total_cost_reshaped, seed_rank
 

@@ -262,9 +262,12 @@ class TestMotionPlannerGoalsetRetries:
          ([False, True], 1, 1, False)],
     )
     def test_empty_ik_attempt_uses_remaining_budget(
-        self, ik_success, max_attempts, expected_calls, succeeds
+        self, ik_success, max_attempts, expected_calls, succeeds, monkeypatch
     ):
         """Retry empty IK batches, stop on success, and respect a one-attempt limit."""
+        monkeypatch.setattr(
+            "curobo._src.motion.motion_goalset.plan_goalset_fallback", lambda *args: None
+        )
         planner = MotionPlanner.__new__(MotionPlanner)
         planner._destroyed = True
         planner.config = MotionPlannerCfg(None, None)
@@ -947,7 +950,7 @@ class TestMotionPlannerGoalsetWarmupAndPlanning:
         assert result is True
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-    def test_plan_pose_after_goalset_warmup(self, goalset_planner, cuda_device_cfg):
+    def test_single_pose_after_goalset_warmup(self, goalset_planner, cuda_device_cfg):
         """Test plan_pose (num_goalset=1) works after goalset warmup."""
         planner = goalset_planner
         start = JointState.from_position(

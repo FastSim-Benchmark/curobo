@@ -167,12 +167,17 @@ def test_contact_clearance_preserves_float32_precision(
 
 
 @pytest.mark.parametrize("sweep", [False, True])
-def test_transfer_between_distinct_supports_keeps_other_pairs_checked(sweep: bool) -> None:
-    """One sphere may depart one cuboid and arrive at another in the same query."""
-    world = SceneCollision.from_config(SceneCollisionCfg(scene_model=SceneCfg(cuboid=[
-        Cuboid(name="left", dims=[0.4, 0.4, 0.1], pose=[-0.4, 0, -0.05, 1, 0, 0, 0]),
-        Cuboid(name="right", dims=[0.4, 0.4, 0.1], pose=[0.4, 0, -0.05, 1, 0, 0, 0]),
-    ])))
+@pytest.mark.parametrize("mesh_goal", [False, True])
+def test_transfer_between_distinct_supports_keeps_other_pairs_checked(
+    sweep: bool, mesh_goal: bool
+) -> None:
+    """One sphere may depart a cuboid and arrive at a cuboid or mesh in one query."""
+    left = Cuboid(name="left", dims=[0.4, 0.4, 0.1], pose=[-0.4, 0, -0.05, 1, 0, 0, 0])
+    right = Cuboid(name="right", dims=[0.4, 0.4, 0.1], pose=[0.4, 0, -0.05, 1, 0, 0, 0])
+    world = SceneCollision.from_config(SceneCollisionCfg(scene_model=SceneCfg(
+        cuboid=[left] + ([] if mesh_goal else [right]),
+        mesh=[right.get_mesh()] if mesh_goal else [],
+    )))
     cfg = SceneCollisionCostCfg(
         weight=1.0, num_spheres=2, use_sweep=sweep,
         start_contact=StartContact("left", (0,), ((-0.4, 0, 0.049, 0.05),)),

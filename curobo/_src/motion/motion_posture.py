@@ -61,7 +61,12 @@ def posture_scope(
         raise ValueError("held joint start exceeds position limits")
     costs, saved, axis_weights = [], [], []
     solvers = (planner.ik_solver, planner.trajopt_solver)
+    use_lm_seed = planner.ik_solver.config.use_lm_seed
     try:
+        # The LM seeder solves Cartesian poses, not this joint goal set. Its
+        # dummy current-tool goal would pull sampled posture endpoints back
+        # toward the start before the posture optimizer can evaluate them.
+        planner.ik_solver.config.use_lm_seed = False
         # Enabling posture changes which residuals execute in the rollout.
         # Resident CUDA graphs must include the current request's constraint.
         for solver in solvers:
@@ -109,6 +114,7 @@ def posture_scope(
                         b.zero_()
         yield positions, mask, held, initial
     finally:
+        planner.ik_solver.config.use_lm_seed = use_lm_seed
         if held_mask.any():
             planner.update_joint_limits(position=original_limits)
         for cost, weight in axis_weights:

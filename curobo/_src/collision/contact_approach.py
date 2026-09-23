@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 class GoalContact:
     """One immutable terminal-contact declaration for a single-environment query."""
 
-    #: Name of the static cuboid support.
+    #: Name of the static cuboid or mesh support.
     obstacle_name: str
     #: Robot sphere indices whose final support contact is being replaced.
     sphere_indices: tuple[int, ...]
@@ -68,6 +68,7 @@ class ContactApproach:
         self.declaration = declaration
         self.separation = ContactSeparation(declaration.as_departure(), scene, num_spheres)
         self.replacement_ids = self.separation.replacement_ids
+        self.replacement_mesh_ids = self.separation.replacement_mesh_ids
         self.landing = (
             LandingAlignment(declaration.landing, self.separation)
             if declaration.landing is not None

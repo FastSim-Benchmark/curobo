@@ -86,7 +86,8 @@ def test_reactivated_posture_preserves_goal_selection_and_gradients(device_cfg):
 
 
 @pytest.mark.parametrize("abort", [False, True])
-def test_scope_invalidates_graphs_and_restores_after_exit(device_cfg, abort):
+@pytest.mark.parametrize("use_lm_seed", [False, True])
+def test_scope_invalidates_graphs_and_restores_after_exit(device_cfg, abort, use_lm_seed):
     cost = PostureCost(BaseCostCfg(weight=1.0, device_cfg=device_cfg), 3)
     axes = SimpleNamespace(
         terminal_pose_axes_weight_factor=torch.ones(6),
@@ -101,7 +102,8 @@ def test_scope_invalidates_graphs_and_restores_after_exit(device_cfg, abort):
     invalidations = []
 
     def solver(name):
-        return SimpleNamespace(core=SimpleNamespace(
+        return SimpleNamespace(config=SimpleNamespace(use_lm_seed=use_lm_seed),
+                               core=SimpleNamespace(
             get_all_rollout_instances=lambda: [rollout],
             additional_metrics_rollouts={},
             invalidate_parameter_graphs=lambda: invalidations.append((name, cost.enabled)),
@@ -117,6 +119,7 @@ def test_scope_invalidates_graphs_and_restores_after_exit(device_cfg, abort):
     goals = JointState.from_position(torch.ones((1, 3)) * 0.1, joint_names=planner.joint_names)
     try:
         with posture_scope(planner, goals, start, (), (), 0.01):
+            assert not planner.ik_solver.config.use_lm_seed
             assert cost.enabled
             assert not axes.terminal_pose_axes_weight_factor.any()
             assert invalidations == [("ik", False), ("trajopt", False)]
@@ -125,6 +128,7 @@ def test_scope_invalidates_graphs_and_restores_after_exit(device_cfg, abort):
     except RuntimeError as error:
         assert abort and str(error) == "cancel query"
     assert not cost.enabled
+    assert planner.ik_solver.config.use_lm_seed == use_lm_seed
     assert not cost.active.any()
     assert axes.terminal_pose_axes_weight_factor.all()
     assert axes.non_terminal_pose_axes_weight_factor.all()

@@ -27,6 +27,7 @@ from curobo._src.solver.solve_state import SolveState
 from curobo._src.solver.solver_core import SolverCore
 from curobo._src.solver.solver_trajopt_cfg import TrajOptSolverCfg
 from curobo._src.solver.solver_trajopt_result import TrajOptSolverResult
+from curobo._src.solver.trajopt_diagnostics import joint_bound_diagnostics
 from curobo._src.state.state_joint import JointState
 from curobo._src.types.control_space import ControlSpace
 from curobo._src.types.tool_pose import GoalToolPose, ToolPose
@@ -475,6 +476,14 @@ class TrajOptSolver:
         best_solution = best_trajopt_result.js_solution
         if best_solution.joint_names is None:
             best_solution.joint_names = self.joint_names
+        if not bool(best_trajopt_result.success.any()):
+            manager = self.metrics_rollout.metrics_constraint_manager
+            if manager is not None and manager.has_cost("cspace"):
+                debug = dict(best_trajopt_result.debug_info or {})
+                debug["selected_joint_bounds"] = joint_bound_diagnostics(
+                    best_solution, manager.get_cost("cspace").config
+                )
+                best_trajopt_result.debug_info = debug
         best_trajopt_result.js_solution = (
             self.auxiliary_rollout.transition_model.get_full_dof_from_solution(best_solution)
         )

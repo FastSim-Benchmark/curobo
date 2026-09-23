@@ -13,11 +13,15 @@ import torch
 from curobo._src.collision.contact_approach import ContactApproach, GoalContact
 from curobo._src.collision.contact_departure_set import ContactDepartureSet
 from curobo._src.collision.contact_mesh import MeshClearance
-from curobo._src.collision.contact_separation import ContactSeparation, StartContact
+from curobo._src.collision.contact_separation import (
+    ContactSeparation,
+    StartContact,
+    _ContactPenetrationError,
+)
 from curobo._src.collision.contact_transfer import ContactTransfer
 from curobo._src.state.state_joint import JointState
 from curobo._src.types.pose import Pose
-from curobo._src.util.logging import log_and_raise
+from curobo._src.util.logging import log_and_raise, log_warn
 
 if TYPE_CHECKING:
     from curobo._src.cost.cost_scene_collision import SceneCollisionCost
@@ -25,6 +29,10 @@ if TYPE_CHECKING:
     from curobo._src.solver.solver_ik import IKSolver
     from curobo._src.solver.solver_trajopt import TrajOptSolver
     from curobo._src.types.tool_pose import GoalToolPose
+
+
+class _AmbiguousGoalContactError(ValueError):
+    """An endpoint needs more than the supported single terminal support."""
 
 
 def validate_boundary_mode(value: str) -> None:
@@ -49,6 +57,13 @@ def scene_costs(solver: IKSolver | TrajOptSolver) -> list[SceneCollisionCost]:
 def contact_goal_seed(
     planner: MotionPlanner, goals: GoalToolPose, current: JointState
 ) -> JointState | None:
+    """Return the first fully captured candidate for single endpoint consumers."""
+    return next(contact_goal_candidates(planner, goals, current), None)
+
+
+def contact_goal_candidates(
+    planner: MotionPlanner, goals: GoalToolPose, current: JointState
+) -> Iterator[JointState]:
     """Obtain kinematic endpoint evidence, then restore full scene checks.
 
     This candidate is never executed or accepted as a trajectory. The subsequent
@@ -62,16 +77,33 @@ def contact_goal_seed(
     try:
         for cost in enabled:
             cost.disable_cost()
-        result = planner.ik_solver.solve_pose(goals, return_seeds=1, current_state=current)
+        result = planner.ik_solver.solve_pose(
+            goals, return_seeds=planner.ik_solver.config.num_seeds, current_state=current
+        )
     finally:
         for cost, weight in zip(enabled, weights):
             cost.enable_cost()
             cost._weight.copy_(weight)
         planner.ik_solver.core.invalidate_parameter_graphs()
     if not bool(result.success.any()):
-        return None
-    position = result.solution[result.success][0].reshape(1, -1)
-    return JointState.from_position(position, joint_names=planner.joint_names)
+        return
+    rejected = []
+    accepted = False
+    for position in result.solution[result.success]:
+        state = JointState.from_position(position.reshape(1, -1), joint_names=planner.joint_names)
+        try:
+            capture_contact(planner, state, terminal=True)
+        except (_ContactPenetrationError, _AmbiguousGoalContactError) as error:
+            rejected.append(str(error))
+            continue
+        accepted = True
+        yield state
+    if not accepted:
+        log_warn(
+            f"All {len(rejected)} kinematic endpoint candidates failed "
+            "bounded contact validation; "
+            f"first rejections: {rejected[:4]}"
+        )
 
 
 def capture_contact(
@@ -136,7 +168,7 @@ def capture_contact(
         ContactSeparation(captured, scene, len(spheres))
         contacts.append(declaration)
     meshes = scene.data.meshes
-    if not terminal and meshes is not None:
+    if meshes is not None:
         mesh_indices = torch.nonzero(meshes.enable[0]).reshape(-1).to(torch.int32)
         if mesh_indices.numel():
             gaps = MeshClearance.apply(spheres, meshes, mesh_indices)
@@ -144,20 +176,29 @@ def capture_contact(
             for column in torch.nonzero(touching.any(0)).reshape(-1).tolist():
                 index = int(mesh_indices[column])
                 indices = torch.nonzero(touching[:, column]).reshape(-1)
-                declaration = StartContact(
-                    meshes.names[0][index],
-                    tuple(indices.tolist()),
-                    tuple(tuple(row) for row in spheres[indices].tolist()),
-                    max_initial_penetration=max_initial_penetration,
+                name = meshes.names[0][index]
+                selected = tuple(indices.tolist())
+                geometry = tuple(tuple(row) for row in spheres[indices].tolist())
+                declaration = (
+                    GoalContact(name, selected, geometry)
+                    if terminal
+                    else StartContact(
+                        name, selected, geometry, max_initial_penetration=max_initial_penetration
+                    )
                 )
-                ContactSeparation(declaration, scene, len(spheres))
+                captured = (
+                    declaration.as_departure()
+                    if isinstance(declaration, GoalContact)
+                    else declaration
+                )
+                ContactSeparation(captured, scene, len(spheres))
                 contacts.append(declaration)
     if len(contacts) > 1 and not terminal:
         if len(contacts) > 8:
             log_and_raise("Start contact supports at most 8 initial supports")
         return tuple(contacts)
     if len(contacts) > 1:
-        log_and_raise(
+        raise _AmbiguousGoalContactError(
             "Boundary contact supports one static support per endpoint; "
             "multiple supports are ambiguous"
         )
