@@ -115,6 +115,25 @@ def ik_failure_diagnostics(
         "selected_seed_count": indices.numel(),
         "constraints": constraints,
     }
+    rejected = torch.nonzero(
+        converged.reshape(-1) & ~success.reshape(-1), as_tuple=False
+    ).flatten()
+    sampled = rejected[:8]
+    result["converged_rejected_seeds"] = {
+        "count": rejected.numel(),
+        "sample_truncated": rejected.numel() > sampled.numel(),
+        "seeds": [
+            {
+                "seed_index": int(index),
+                "feasible": bool(feasible.reshape(-1)[index]),
+                "constraint_maxima": {
+                    name: float(value.detach().reshape(seed_count, -1)[index].max())
+                    for name, value in zip(group.names, group.values)
+                },
+            }
+            for index in sampled.tolist()
+        ],
+    }
     if config is not None:
         all_positions = metrics.state.joint_state.position
         dof = all_positions.shape[-1]

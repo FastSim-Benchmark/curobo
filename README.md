@@ -216,3 +216,7 @@ up to eight enabled pairs at the optimized start and peak, separating geometric
 overlap from padding, in meters. Disabled spheres are omitted. These samples do
 not replace contact-aware feasibility checks or explain unsampled interpolated
 states. Diagnostic collection does not change collision masks or acceptance.
+
+Failed IK batches also report constraint maxima for up to eight converged but
+rejected seeds, including seeds outside the optimizer's selected subset. The
+total count and truncation flag distinguish a bounded sample from the full batch.

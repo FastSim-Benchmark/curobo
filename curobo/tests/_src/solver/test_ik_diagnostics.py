@@ -55,6 +55,16 @@ def test_failed_ik_counts_constraints_without_changing_success():
     assert result["constraints"]["self_collision"]["positive_cost_seed_count"] == 0
     assert result["selected_joint_bounds"]["terms"]["position"]["maximum_excess"] == 0.5
     assert result["selected_joint_bounds"]["source"] == "ik_endpoint_joint_state"
+    assert result["converged_rejected_seeds"] == {
+        "count": 2,
+        "sample_truncated": False,
+        "seeds": [
+            {"seed_index": 1, "feasible": False,
+             "constraint_maxima": {"cspace": 2.0, "scene_collision": 0.0, "self_collision": 0.0}},
+            {"seed_index": 2, "feasible": False,
+             "constraint_maxima": {"cspace": 0.0, "scene_collision": 3.0, "self_collision": 0.0}},
+        ],
+    }
     torch.testing.assert_close(success, before)
 
 
@@ -68,6 +78,30 @@ def test_missing_cspace_config_and_selected_indices_stay_bounded():
     assert result["selected_seed_indices"] == list(range(8))
     assert result["selected_seed_count"] == 40
     assert "selected_joint_bounds" not in result
+    assert result["converged_rejected_seeds"] == {
+        "count": 0, "sample_truncated": False, "seeds": []
+    }
+
+
+def test_converged_rejections_include_unselected_seeds_and_are_bounded():
+    metrics = SimpleNamespace(
+        costs_and_constraints=SimpleNamespace(constraints=SimpleNamespace(
+            names=["scene_collision"], values=[torch.arange(20, dtype=torch.float32)]
+        ))
+    )
+    converged = torch.arange(20) >= 5
+    feasible = torch.arange(20) == 19
+    success = feasible & converged
+    before = [tensor.clone() for tensor in (feasible, converged, success)]
+    result = ik_failure_diagnostics(
+        metrics, feasible, converged, success, torch.tensor([0]), None
+    )["converged_rejected_seeds"]
+    assert result["count"] == 14 and result["sample_truncated"]
+    assert [s["seed_index"] for s in result["seeds"]] == list(range(5, 13))
+    assert all(s["constraint_maxima"]["scene_collision"] == s["seed_index"]
+               for s in result["seeds"])
+    for tensor, previous in zip((feasible, converged, success), before):
+        torch.testing.assert_close(tensor, previous)
 
 
 def pair_inputs(spheres, pairs, padding=None):
