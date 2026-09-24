@@ -65,7 +65,8 @@ The main function is :func:`curobo.sphere_fit.fit_spheres_to_mesh`:
      - Optimization iterations for ``MORPHIT`` (default ``200``). FAST uses its
        bounded internal optimizer and does not use this parameter.
    * - ``compute_metrics``
-     - When ``True``, populates quality metrics on the result.
+     - When ``True``, populates quality metrics on the result using the requested
+       ``device_cfg`` device, including CPU. CPU queries are not redirected to CUDA.
    * - ``clip_plane``
      - Half-plane constraint ``((nx, ny, nz), offset)`` in mesh-local coordinates.
        Spheres that cross the plane are penalised during MorphIt optimization and

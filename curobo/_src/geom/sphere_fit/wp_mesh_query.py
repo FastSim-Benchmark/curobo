@@ -116,21 +116,21 @@ def _closest_point_kernel(
 # ---------------------------------------------------------------------------
 
 class WarpMeshQuery:
-    """GPU-accelerated mesh queries backed by a Warp BVH.
+    """Device-local mesh queries backed by a Warp BVH.
 
     Builds a Warp :class:`wp.Mesh` from a :class:`trimesh.Trimesh` once, then
-    provides fast batched queries on the GPU. All public methods accept and return
-    :class:`torch.Tensor` on the same CUDA device.
+    provides batched queries on CPU or CUDA. All public methods accept and return
+    :class:`torch.Tensor` on the same device.
 
     Args:
         mesh: Source triangle mesh.
-        device: Torch device (must be CUDA).
+        device: Torch CPU or CUDA device.
     """
 
     def __init__(self, mesh: trimesh.Trimesh, device: torch.device):
         init_warp()
 
-        if device.index is None:
+        if device.type == "cuda" and device.index is None:
             device = torch.device("cuda", 0)
         self.device = device
 
@@ -170,7 +170,7 @@ class WarpMeshQuery:
         """Return a boolean mask that is ``True`` for points outside the mesh.
 
         Args:
-            points: Query points of shape ``(N, 3)`` on the same CUDA device.
+            points: Query points of shape ``(N, 3)`` on the query device.
 
         Returns:
             Boolean tensor of shape ``(N,)``.
@@ -200,7 +200,7 @@ class WarpMeshQuery:
         a loss function, see :class:`WarpSphereSDFFunction`.
 
         Args:
-            points: Query points of shape ``(N, 3)`` on the same CUDA device.
+            points: Query points of shape ``(N, 3)`` on the query device.
 
         Returns:
             Tuple ``(sdf, grad)`` where ``sdf`` has shape ``(N,)`` and ``grad`` has
@@ -234,7 +234,7 @@ class WarpMeshQuery:
         ``on_surface`` in a single GPU kernel launch.
 
         Args:
-            points: Query points of shape ``(N, 3)`` on the same CUDA device.
+            points: Query points of shape ``(N, 3)`` on the query device.
 
         Returns:
             Tuple ``(closest_points, sdf)`` where ``closest_points`` has shape
