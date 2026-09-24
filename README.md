@@ -220,3 +220,7 @@ states. Diagnostic collection does not change collision masks or acceptance.
 Failed IK batches also report constraint maxima for up to eight converged but
 rejected seeds, including seeds outside the optimizer's selected subset. The
 total count and truncation flag distinguish a bounded sample from the full batch.
+For a single collision environment, up to four such seeds also report eight raw
+mesh gap pairs each using their existing FK spheres. These samples exclude
+disabled spheres and meshes, do not apply contact allowance, and do not describe
+non-mesh obstacles. Unsupported diagnostic environments are marked unavailable.

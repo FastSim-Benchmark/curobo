@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import torch
 
+from curobo._src.collision.contact_mesh import MeshClearance
 from curobo._src.solver.trajopt_diagnostics import joint_bound_diagnostics
 from curobo._src.state.state_joint import JointState
 
@@ -92,7 +93,7 @@ def self_collision_pair_diagnostics(state, selected, seed_count, collision, kine
 
 def ik_failure_diagnostics(
     metrics, feasible, converged, success, selected, config,
-    self_collision_config=None, kinematics_config=None,
+    self_collision_config=None, kinematics_config=None, scene_collision_checker=None,
 ):
     """Separate convergence, collision and bounds for all and selected IK seeds."""
     indices = selected.reshape(-1)
@@ -134,6 +135,10 @@ def ik_failure_diagnostics(
             for index in sampled.tolist()
         ],
     }
+    if sampled.numel() and scene_collision_checker is not None and kinematics_config is not None:
+        result["converged_rejected_mesh_pairs"] = rejected_mesh_pairs(
+            metrics.state, sampled, seed_count, scene_collision_checker, kinematics_config
+        )
     if config is not None:
         all_positions = metrics.state.joint_state.position
         dof = all_positions.shape[-1]
@@ -147,3 +152,37 @@ def ik_failure_diagnostics(
             metrics.state, selected, seed_count, self_collision_config, kinematics_config
         )
     return result
+
+
+def rejected_mesh_pairs(state, selected, seed_count, scene, kinematics):
+    """Sample raw mesh gaps from the exact failed IK FK; acceptance stays unchanged."""
+    meshes = scene.data.meshes
+    if meshes is None or state.robot_spheres is None:
+        return {"available": False, "reason": "mesh_or_fk_geometry_unavailable"}
+    if meshes.enable.shape[0] != 1:
+        return {"available": False, "reason": "multiple_collision_environments_not_sampled"}
+    indices = torch.nonzero(meshes.enable[0]).flatten().to(torch.int32)
+    if not indices.numel():
+        return {"available": False, "reason": "no_enabled_meshes"}
+    spheres = state.robot_spheres.detach().reshape(seed_count, -1, 4)
+    names = {index: name for name, index in kinematics.link_name_to_idx_map.items()}
+    mapping = kinematics.link_sphere_idx_map.tolist()
+    if spheres.shape[1] != len(mapping):
+        raise ValueError("IK endpoint sphere layout does not match kinematics")
+    rows = []
+    for seed in selected[:4].tolist():
+        sample = spheres[seed]
+        with torch.no_grad():
+            gaps = MeshClearance.apply(sample, meshes, indices)
+            gaps = gaps.masked_fill(sample[:, 3:4] <= 0, float("inf"))
+            values, offsets = torch.topk(gaps.flatten(), min(8, gaps.numel()), largest=False)
+        pairs = []
+        for gap, offset in zip(values.tolist(), offsets.tolist()):
+            if gap == float("inf"):
+                continue
+            sphere, mesh = divmod(offset, len(indices))
+            pairs.append({"sphere": sphere, "link": names[mapping[sphere]],
+                          "obstacle": meshes.names[0][int(indices[mesh])], "raw_gap_m": gap})
+        rows.append({"seed_index": seed, "pairs": pairs})
+    return {"available": True, "scope": "raw_mesh_gaps_only_no_contact_allowance",
+            "seed_sample_truncated": selected.numel() > 4, "seeds": rows}

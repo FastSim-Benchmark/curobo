@@ -207,3 +207,36 @@ def test_native_unreachable_ik_retains_failed_constraints():
         assert pairs["source"] == "same_ik_metrics_robot_spheres_and_enabled_collision_pairs"
     finally:
         solver.destroy()
+
+
+def test_rejected_mesh_pairs_use_failed_fk_and_enabled_mesh_indices(monkeypatch):
+    from curobo._src.solver import ik_diagnostics
+    state = SimpleNamespace(robot_spheres=torch.tensor([
+        [[[0., 0., 0., .1], [0., 0., 0., -1.]]],
+        [[[1., 0., 0., .1], [0., 0., 0., -1.]]],
+    ]))
+    meshes = SimpleNamespace(enable=torch.tensor([[True, False, True]]),
+                             names=[['table', 'disabled', 'fork']])
+    scene = SimpleNamespace(data=SimpleNamespace(meshes=meshes))
+    kinematics = SimpleNamespace(link_sphere_idx_map=torch.tensor([0, 1]),
+                                 link_name_to_idx_map={'finger': 0, 'inactive': 1})
+    before = state.robot_spheres.clone()
+
+    def query(spheres, actual_meshes, indices):
+        assert actual_meshes is meshes and indices.tolist() == [0, 2]
+        assert spheres[0, 0] == 1.
+        return torch.tensor([[-.003, .01], [-10., -10.]])
+
+    monkeypatch.setattr(ik_diagnostics.MeshClearance, 'apply', query)
+    result = ik_diagnostics.rejected_mesh_pairs(state, torch.tensor([1]), 2, scene, kinematics)
+    assert result['available'] and not result['seed_sample_truncated']
+    seed, = result['seeds']
+    assert seed['seed_index'] == 1
+    assert [p['obstacle'] for p in seed['pairs']] == ['table', 'fork']
+    assert all(p['link'] == 'finger' for p in seed['pairs'])
+    assert seed['pairs'][0]['raw_gap_m'] == pytest.approx(-.003)
+    torch.testing.assert_close(state.robot_spheres, before)
+    meshes.enable = torch.ones(2, 3, dtype=torch.bool)
+    result = ik_diagnostics.rejected_mesh_pairs(state, torch.tensor([1]), 2, scene, kinematics)
+    assert not result['available']
+    assert result['reason'] == 'multiple_collision_environments_not_sampled'

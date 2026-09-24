@@ -602,6 +602,7 @@ class IKSolver:
                     self.kinematics.config.kinematics_config
                     if self_collision_config is not None else None
                 ),
+                scene_collision_checker=self.scene_collision_checker,
             )
 
         return ik_result
