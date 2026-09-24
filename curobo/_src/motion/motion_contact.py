@@ -86,6 +86,10 @@ def contact_goal_candidates(
             cost._weight.copy_(weight)
         planner.ik_solver.core.invalidate_parameter_graphs()
     if not bool(result.success.any()):
+        log_warn(
+            "Terminal endpoint IK rejected all seeds: "
+            f"{(getattr(result, 'debug_info', None) or {}).get('failed_ik', {})}"
+        )
         return
     rejected = []
     accepted = False

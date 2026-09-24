@@ -82,6 +82,15 @@ def plan_terminal_pose(
                 record["trajectory_success"] = bool(result.success.any())
                 remap_goalset_index(result, index, len(target.tool_frames))
                 last_result = result
+                if not record["trajectory_success"] and "selected_constraint_maxima" in (
+                    result.debug_info or {}
+                ):
+                    from curobo._src.motion.motion_failure_diagnostics import (
+                        terminal_failure_summary,
+                    )
+
+                    evidence = terminal_failure_summary(planner, result)
+                    log_warn(f"Terminal trajectory failure evidence: {evidence}")
             if record["trajectory_success"]:
                 summary["selected_original_goal_index"] = index
                 break

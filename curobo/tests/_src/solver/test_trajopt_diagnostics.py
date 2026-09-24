@@ -98,7 +98,7 @@ def test_position_cost_does_not_mislabel_effort_weight_as_velocity():
 
 
 @pytest.mark.parametrize("success", [False, True])
-def test_solver_result_adds_diagnostics_only_for_failure(success):
+def test_solver_result_adds_diagnostics_only_for_failure(success, caplog):
     """Exercise the real result-selection path without initializing a GPU solver."""
     state, config = fixture()
     state.position[0, 0, -1, 1] = 3.25
@@ -132,8 +132,11 @@ def test_solver_result_adds_diagnostics_only_for_failure(success):
     assert "selected_joint_bounds" not in original_debug
     if success:
         assert "selected_joint_bounds" not in returned.debug_info
+        assert "Rejected trajectory raw joint-bound terms" not in caplog.text
     else:
         detail = returned.debug_info["selected_joint_bounds"]
         assert detail["source"] == "optimized_joint_state"
         assert detail["position_end"] == [0.0, 3.25]
         assert detail["terms"]["position"]["end_maximum_excess"] == 1.25
+        assert "Rejected trajectory raw joint-bound terms" in caplog.text
+        assert str(detail["terms"]) in caplog.text

@@ -423,6 +423,18 @@ class TrajOptSolverResult(BaseSolverResult):
                     group = metrics.costs_and_constraints.constraints
                     summary[label] = {
                         name: {
+                            "maximum_trajectory": int(
+                                value.reshape(batch_size * self.num_seeds, value.shape[1], -1)[
+                                    flat_indices
+                                ]
+                                .reshape(-1).argmax()
+                            ) // (value.numel() // (batch_size * self.num_seeds)),
+                            "maximum_step": int(
+                                value.reshape(batch_size * self.num_seeds, value.shape[1], -1)[
+                                    flat_indices
+                                ].reshape(-1).argmax()
+                            ) // (value.numel() // (batch_size * self.num_seeds * value.shape[1]))
+                            % value.shape[1],
                             "maximum": float(
                                 value.reshape(batch_size * self.num_seeds, value.shape[1], -1)[
                                     flat_indices

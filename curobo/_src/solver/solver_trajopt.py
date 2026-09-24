@@ -484,6 +484,10 @@ class TrajOptSolver:
                     best_solution, manager.get_cost("cspace").config
                 )
                 best_trajopt_result.debug_info = debug
+                log_warn(
+                    "Rejected trajectory raw joint-bound terms: "
+                    f"{debug['selected_joint_bounds']['terms']}"
+                )
         best_trajopt_result.js_solution = (
             self.auxiliary_rollout.transition_model.get_full_dof_from_solution(best_solution)
         )

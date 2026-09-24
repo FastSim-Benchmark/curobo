@@ -102,6 +102,27 @@ def test_ik_rejected_candidates_remain_rejected(scene):
     assert float(result.position[0, 0]) == pytest.approx(0.055)
 
 
+def test_all_ik_failures_preserve_evidence_and_restore_scene_checks(scene, caplog):
+    """Report existing bounded IK evidence without accepting an invalid endpoint."""
+    planner, cost, calls = planner_fixture(scene, [0.049], successful=[False])
+    solve = planner.ik_solver.solve_pose
+    evidence = {"seed_count": 1, "self_collision": {"maximum": 0.003}}
+
+    def rejected(*args, **kwargs):
+        result = solve(*args, **kwargs)
+        result.debug_info = {"failed_ik": evidence}
+        return result
+
+    planner.ik_solver.solve_pose = rejected
+    before = cost._weight.clone()
+    current = JointState.from_position(torch.zeros((1, 1)))
+    assert contact_goal_seed(planner, object(), current) is None
+    assert "Terminal endpoint IK rejected all seeds" in caplog.text
+    assert str(evidence) in caplog.text
+    assert len(calls) == 1 and cost.enabled
+    torch.testing.assert_close(cost._weight, before)
+
+
 def test_unrelated_value_error_propagates(scene):
     """Unexpected model failures are not swallowed as inadmissible geometry."""
     planner, cost, _ = planner_fixture(scene, [0.049])

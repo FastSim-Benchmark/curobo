@@ -208,3 +208,11 @@ remaining candidates and target groups. At most `max_attempts` captured
 candidates are tried per group and at most `max_attempts * num_ik_seeds` groups
 are visited; result diagnostics record the actual attempts and original selected
 goal index. Unrelated solver/model errors still propagate.
+
+Rejected terminal trajectories log bounded geometry diagnostics alongside the
+optimized and interpolated constraint summaries. Raw mesh samples identify the
+selected optimized peak's sphere, link and obstacle. Self-collision samples list
+up to eight enabled pairs at the optimized start and peak, separating geometric
+overlap from padding, in meters. Disabled spheres are omitted. These samples do
+not replace contact-aware feasibility checks or explain unsampled interpolated
+states. Diagnostic collection does not change collision masks or acceptance.
