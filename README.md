@@ -2,6 +2,15 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # cuRobo
 
+## Trajectory interpolation at joint limits
+
+Dense trajectory validation projects a position excursion of at most one
+representable floating-point step back onto its joint limit, only when that
+coordinate's optimized trajectory is finite and entirely within the limits.
+This prevents spline rounding at an exact limit from falsely rejecting a valid
+trajectory. Larger excursions, violating reference trajectories, derivative
+limits, and collision checks retain their existing rejection behavior.
+
 ## Default sphere fitting in this fork
 
 Fork version `0.8.0.post1.dev58` introduces the FAST default and clipping

@@ -32,6 +32,7 @@ from curobo._src.state.state_joint import JointState
 from curobo._src.types.control_space import ControlSpace
 from curobo._src.types.tool_pose import GoalToolPose, ToolPose
 from curobo._src.util.cuda_event_timer import CudaEventTimer
+from curobo._src.util.interpolation_roundoff import project_interpolation_position_roundoff
 from curobo._src.util.logging import log_and_raise, log_warn
 from curobo._src.util.torch_util import get_torch_jit_decorator
 from curobo._src.util.trajectory import calculate_dt_no_clamp, get_batch_interpolated_trajectory
@@ -506,6 +507,11 @@ class TrajOptSolver:
         interpolated_js, last_tstep, buffer_updated = self.get_interpolated_trajectory(js_optimized)
         interpolated_js = interpolated_rollout.transition_model.project_held_coordinates(
             interpolated_js
+        )
+        interpolated_js = project_interpolation_position_roundoff(
+            interpolated_js,
+            js_optimized,
+            interpolated_rollout.transition_model.joint_limits.position,
         )
         interpolated_robot_state = interpolated_rollout.transition_model.compute_augmented_state(
             interpolated_js
