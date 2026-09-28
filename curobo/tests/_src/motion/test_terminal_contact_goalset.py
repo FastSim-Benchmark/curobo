@@ -100,6 +100,59 @@ def test_all_candidate_trajectories_rejected_obeys_both_budgets(monkeypatch, cap
     assert "selected_original_goal_index" not in result.debug_info["terminal_contact_search"]
 
 
+def test_empty_first_proposal_batch_uses_remaining_attempt_budget(monkeypatch):
+    planner, goals, current, calls = terminal_fixture(
+        monkeypatch, trajectory_valid=lambda i, c: True
+    )
+    original = module.contact_goal_candidates
+    batches = []
+
+    def empty_then_valid(owner, target, start):
+        batches.append(int(target.position[0, 0, 0, 0, 0]))
+        if len(batches) > 1:
+            yield from original(owner, target, start)
+
+    monkeypatch.setattr(module, "contact_goal_candidates", empty_then_valid)
+    result = module.plan_terminal_pose(planner, goals, current, False, 2, "end")
+    assert result.success.all() and batches == [0, 0]
+    assert calls.metrics == calls.trajectory == calls.restored == [(0, 0)]
+    summary = result.debug_info["terminal_contact_search"]
+    assert summary["proposal_batch_count"] == 2
+    assert summary["attempts"][0]["proposal_batch_index"] == 1
+
+
+def test_empty_batches_exhaust_bounded_budget_without_trajectory(monkeypatch, caplog):
+    planner, goals, current, calls = terminal_fixture(monkeypatch)
+    batches = []
+
+    def empty(owner, target, start):
+        batches.append(int(target.position[0, 0, 0, 0, 0]))
+        return iter(())
+
+    monkeypatch.setattr(module, "contact_goal_candidates", empty)
+    assert module.plan_terminal_pose(planner, goals, current, False, 2, "end") is None
+    assert batches == [0, 0, 1, 1, 2, 2]
+    assert calls.metrics == calls.trajectory == calls.restored == []
+    assert "'proposal_batch_count': 6" in caplog.text
+
+
+def test_rejected_endpoint_retry_keeps_total_candidate_budget(monkeypatch):
+    planner, goals, current, calls = terminal_fixture(
+        monkeypatch, endpoint_valid=lambda i, c: False
+    )
+    original = module.contact_goal_candidates
+    batches = []
+
+    def one_per_batch(owner, target, start):
+        batches.append(int(target.position[0, 0, 0, 0, 0]))
+        yield next(original(owner, target, start))
+
+    monkeypatch.setattr(module, "contact_goal_candidates", one_per_batch)
+    assert module.plan_terminal_pose(planner, goals, current, False, 2, "end") is None
+    assert batches == [0, 0, 1, 1, 2, 2]
+    assert len(calls.metrics) == len(calls.restored) == 6 and calls.trajectory == []
+
+
 @pytest.mark.parametrize("solver", ["ik_solver", "trajopt_solver"])
 def test_terminal_scope_restored_but_unknown_solver_error_propagates(monkeypatch, solver):
     planner, goals, current, calls = terminal_fixture(monkeypatch)

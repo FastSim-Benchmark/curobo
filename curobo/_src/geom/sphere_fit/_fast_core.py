@@ -176,7 +176,7 @@ def tighten_balls(points, centers, radii, dirs, support, tolerance):
     return centers, radii, outcomes
 
 
-def fit_spheres(vertices, faces, config=None, convex_parts=None):
+def fit_spheres(vertices, faces, config=None, convex_parts=None, minimum_z=None):
     """Return centers/radii and an auditable decision record, in input units.
 
     envelope_tolerance is relative to the longest PCA-aligned extent. The
@@ -219,6 +219,10 @@ def fit_spheres(vertices, faces, config=None, convex_parts=None):
     scale = np.ptp(x, axis=0).max()
     x, train = x / scale, train @ basis / scale
     physical_scale = rough_scale * scale
+    if minimum_z is not None and (
+        not np.isfinite(minimum_z) or minimum_z > v[:, 2].min()
+    ):
+        raise ValueError("minimum_z must be finite and at or below the mesh bottom")
     dirs = directions()
     support = np.full(len(dirs), -np.inf)
     extrema = []
@@ -234,6 +238,15 @@ def fit_spheres(vertices, faces, config=None, convex_parts=None):
     )
     points = np.unique(np.concatenate((train, x[np.unique(np.r_[selected, extrema])])), axis=0)
     validation = sample_surface(x, f, cfg.validation_samples, cfg.seed + 1)
+    constraint_dirs, constraint_support = dirs, support
+    if minimum_z is not None:
+        # Preserve the object-local plane through the PCA coordinate change.
+        # tighten_balls adds the ordinary envelope tolerance to every ceiling;
+        # subtract it here so this additional plane keeps its exact bound.
+        plane_normal = basis[2, :]
+        plane_offset = (minimum_z - shift[2]) / physical_scale
+        constraint_dirs = np.vstack((dirs, -plane_normal))
+        constraint_support = np.r_[support, -plane_offset - cfg.envelope_tolerance]
     records, candidates = [], []
     partition_diagnostics = None
 
@@ -242,7 +255,7 @@ def fit_spheres(vertices, faces, config=None, convex_parts=None):
         optimization = None
         if cfg.tight_envelope:
             centers, radii, optimization = tighten_balls(
-                points, centers, radii, dirs, support, cfg.envelope_tolerance
+                points, centers, radii, constraint_dirs, constraint_support, cfg.envelope_tolerance
             )
         gaps = signed_gaps(validation, centers, radii)
         excess = np.maximum((centers @ dirs.T + radii[:, None]).max(axis=0) - support, 0)

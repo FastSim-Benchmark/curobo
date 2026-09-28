@@ -10,7 +10,7 @@ from curobo._src.geom.sphere_fit._fast_refine import refine
 from curobo._src.util.logging import log_warn
 
 
-def fast_fit_mesh(mesh, num_spheres):
+def fast_fit_mesh(mesh, num_spheres, minimum_z=None):
     """Fit original geometry; partition only when the basic audit fails.
 
     The count is a budget, not a promise to output exactly that many spheres.
@@ -19,15 +19,15 @@ def fast_fit_mesh(mesh, num_spheres):
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     faces = np.asarray(mesh.faces)
     config = Config(max_spheres=num_spheres)
-    initial = fit_spheres(vertices, faces, config)
+    initial = fit_spheres(vertices, faces, config, minimum_z=minimum_z)
     partition = {"status": "skipped_basic_targets_met"}
     if not initial["target_met"]:
         parts, partition = propose_parts(vertices, faces, min(8, num_spheres), config.seed, 30)
         if parts is not None:
-            initial = fit_spheres(vertices, faces, config, convex_parts=parts)
+            initial = fit_spheres(vertices, faces, config, convex_parts=parts, minimum_z=minimum_z)
         else:
             log_warn(f"FAST partition unavailable: {partition}; retaining the audited basic fit")
-    final = refine(vertices, faces, initial["centers"], initial["radii"])
+    final = refine(vertices, faces, initial["centers"], initial["radii"], minimum_z=minimum_z)
     diagnostics = {
         "partition": partition,
         "initial_route": initial["route"],

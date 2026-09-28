@@ -100,10 +100,12 @@ def test_boundary_scope_restores_after_exception_and_rejects_deep_contact(
         planner.destroy()
 
 
+@pytest.mark.parametrize("scene_guided", [False, True])
 def test_goal_seed_exception_restores_exact_scene_weights(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scene_guided: bool
 ) -> None:
     """Temporary evidence IK preserves runtime weights and disabled cost components."""
+    from curobo._src.motion import motion_contact
     from curobo._src.motion.motion_contact import scene_costs
 
     planner, contact, clear, _ = make_planner(tmp_path, "table", False)
@@ -116,9 +118,17 @@ def test_goal_seed_exception_restores_exact_scene_weights(
                 cost._weight.mul_(0.75)
         saved = [(cost.enabled, cost._weight.clone()) for cost in costs]
         assert any(enabled for enabled, _ in saved)
+        spheres = planner.attachment_manager.kinematics_params.link_spheres
+        saved_spheres = spheres.clone()
+        if not scene_guided:
+            monkeypatch.setattr(motion_contact, "_payload_goal_candidates", lambda *args: iter(()))
 
         def fail(*args: object, **kwargs: object) -> None:
-            assert all(not cost.enabled for cost in costs)
+            if scene_guided:
+                assert [cost.enabled for cost in costs] == [enabled for enabled, _ in saved]
+                assert not torch.equal(spheres, saved_spheres)
+            else:
+                assert all(not cost.enabled for cost in costs)
             raise RuntimeError("injected evidence IK failure")
 
         monkeypatch.setattr(planner.ik_solver, "solve_pose", fail)
@@ -128,6 +138,7 @@ def test_goal_seed_exception_restores_exact_scene_weights(
                 clear,
                 allow_boundary_collision="end",
             )
+        torch.testing.assert_close(spheres, saved_spheres, atol=0, rtol=0)
         for cost, (enabled, weight) in zip(costs, saved):
             assert cost.enabled is enabled
             torch.testing.assert_close(cost._weight, weight, atol=0, rtol=0)

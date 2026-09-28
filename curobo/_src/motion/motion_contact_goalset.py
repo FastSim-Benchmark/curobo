@@ -17,6 +17,14 @@ if TYPE_CHECKING:
     from curobo._src.types.tool_pose import GoalToolPose
 
 
+def _candidate_batches(planner, target, current, max_attempts, summary):
+    """Spend the existing attempt budget on fresh proposals when a batch dries up."""
+    for batch_index in range(max_attempts):
+        summary["proposal_batch_count"] += 1
+        for endpoint in contact_goal_candidates(planner, target, current):
+            yield batch_index, endpoint
+
+
 def plan_terminal_pose(
     planner: MotionPlanner,
     goals: GoalToolPose,
@@ -28,7 +36,8 @@ def plan_terminal_pose(
     """Validate and seed each endpoint inside its own immutable contact scope.
 
     Existing budgets bound groups by attempts times IK seeds, and each group's
-    captured candidates by attempts. No optimizer reruns the endpoint IK after
+    captured candidates and proposal batches by attempts. Empty proposal batches
+    do not consume the entire goal's search budget. No optimizer reruns endpoint IK after
     capture: complete IK metrics validate that same state before native TrajOpt.
     """
     budget = min(goals.num_goalset, max_attempts * planner.ik_solver.config.num_seeds)
@@ -38,6 +47,7 @@ def plan_terminal_pose(
         "candidate_budget_per_goal": max_attempts,
         "attempted_goal_indices": [],
         "captured_candidate_count": 0,
+        "proposal_batch_count": 0,
         "endpoint_metric_rejection_count": 0,
         "trajectory_attempt_count": 0,
         "attempts": [],
@@ -46,10 +56,13 @@ def plan_terminal_pose(
     for index in range(budget):
         target = goal_group(goals, index)
         summary["attempted_goal_indices"].append(index)
-        candidates = contact_goal_candidates(planner, target, current)
-        for candidate_index, endpoint in enumerate(islice(candidates, max_attempts)):
+        candidates = _candidate_batches(planner, target, current, max_attempts, summary)
+        for candidate_index, (batch_index, endpoint) in enumerate(
+            islice(candidates, max_attempts)
+        ):
             summary["captured_candidate_count"] += 1
-            record = {"goal_index": index, "candidate_index": candidate_index}
+            record = {"goal_index": index, "candidate_index": candidate_index,
+                      "proposal_batch_index": batch_index}
             summary["attempts"].append(record)
             with boundary_contact_scope(planner, current, endpoint, mode):
                 seeds = endpoint.position.reshape(1, 1, -1).repeat(
@@ -89,8 +102,9 @@ def plan_terminal_pose(
                         terminal_failure_summary,
                     )
 
-                    evidence = terminal_failure_summary(planner, result)
-                    log_warn(f"Terminal trajectory failure evidence: {evidence}")
+                    for kind in ("optimized", "interpolated"):
+                        evidence = terminal_failure_summary(planner, result, trajectory_kind=kind)
+                        log_warn(f"Terminal {kind} trajectory failure evidence: {evidence}")
             if record["trajectory_success"]:
                 summary["selected_original_goal_index"] = index
                 break

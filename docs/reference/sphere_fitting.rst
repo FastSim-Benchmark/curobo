@@ -274,7 +274,13 @@ Object-local bottom bound
 ``fit_spheres_to_mesh(..., max_bottom_protrusion_m=0.002)`` optionally limits
 every sphere's lowest local Z to the source mesh minimum Z minus 2 mm. The
 default ``None`` preserves existing behavior. The bound must be finite and
-nonnegative. Radii are clamped and invalid spheres removed; the bound is checked
-again after output dtype conversion. Quality metrics describe the clipped result.
+nonnegative. FAST includes this plane in its candidate fitting and sphere-count
+selection, then evaluates refinement candidates after applying the same bound.
+This avoids selecting an apparently adequate fit whose coverage is lost only
+when the bottom is clipped afterward. The plane remains in object coordinates
+through the internal PCA transforms. Final radius clipping and invalid-sphere
+removal remain as a precision safeguard, including after output dtype conversion.
+Other fitters retain their existing post-fit clipping behavior. Quality metrics
+describe the final bounded result.
 This is not a coverage guarantee or a world-gravity constraint after rotation.
 FAST returns an error for an empty fit; it never falls back to a legacy fitter.

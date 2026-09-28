@@ -46,8 +46,8 @@ def capture(scene, height):
     return capture_contact(planner, torch.zeros((1, 1), device="cuda"), terminal=True)
 
 
-@pytest.mark.parametrize("penetration", [0.0005, 0.001999])
-def test_capture_terminal_support_below_two_mm(support_scene, penetration):
+@pytest.mark.parametrize("penetration", [0.0005, 0.001999, 0.002001])
+def test_capture_terminal_support_within_declared_tolerance(support_scene, penetration):
     """A mesh endpoint must create the same bounded goal declaration as a cuboid."""
     declaration = capture(support_scene, 0.05 - penetration)
     assert isinstance(declaration, GoalContact)
@@ -56,8 +56,8 @@ def test_capture_terminal_support_below_two_mm(support_scene, penetration):
     assert declaration.max_goal_penetration == 0.002
 
 
-@pytest.mark.parametrize("penetration", [0.002001, 0.01])
-def test_capture_terminal_support_above_two_mm_is_rejected(support_scene, penetration):
+@pytest.mark.parametrize("penetration", [0.00202, 0.01])
+def test_capture_terminal_support_above_declared_tolerance_is_rejected(support_scene, penetration):
     """Contact discovery cannot turn excessive model overlap into an exemption."""
     with pytest.raises(ValueError, match="penetration"):
         capture(support_scene, 0.05 - penetration)

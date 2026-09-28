@@ -11,6 +11,19 @@ This prevents spline rounding at an exact limit from falsely rejecting a valid
 trajectory. Larger excursions, violating reference trajectories, derivative
 limits, and collision checks retain their existing rejection behavior.
 
+Failed posture and terminal-contact queries log bounded collision diagnostics
+for both the optimized and interpolated trajectories while the request's contact
+scope is still active. Dense collision peaks use the dense state and its own
+metrics rollout. Departure diagnostics distinguish actual support penetration
+from a nonmonotonic clearance change; neither measurement changes acceptance.
+
+Terminal-contact pose search uses `max_attempts` to bound both fresh endpoint
+proposal batches and captured candidates per target. If a proposal batch contains
+no acceptable endpoint, remaining batches are sampled before moving to another
+target. Endpoint contact validation, exact target/seed binding, and trajectory
+collision and limit checks remain mandatory. Exhausted searches can take longer
+than a single proposal batch; no additional unbounded retry loop is introduced.
+
 ## Default sphere fitting in this fork
 
 Fork version `0.8.0.post1.dev58` introduces the FAST default and clipping

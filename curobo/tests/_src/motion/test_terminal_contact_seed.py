@@ -73,7 +73,7 @@ def planner_fixture(scene, heights, successful=None):
     return planner, cost, calls
 
 
-@pytest.mark.parametrize("invalid_height", [0.03, 0.2, 0.047999])
+@pytest.mark.parametrize("invalid_height", [0.03, 0.2, 0.04798])
 def test_reject_deep_candidate_then_keep_bounded_candidate(scene, invalid_height):
     """Reject deep support/other-obstacle overlap before selecting a sub-2mm endpoint."""
     planner, cost, calls = planner_fixture(scene, [invalid_height, 0.048001])

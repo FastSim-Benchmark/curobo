@@ -178,7 +178,7 @@ def interior_seed(hull, vertices, points, weights, count):
     return np.c_[pool[choices], radii[choices]].ravel()
 
 
-def refine(vertices, faces, centers, radii, resolution=128, iterations=100):
+def refine(vertices, faces, centers, radii, resolution=128, iterations=100, minimum_z=None):
     v, f = np.asarray(vertices), np.asarray(faces)
     centers, radii = np.asarray(centers, dtype=float), np.asarray(radii, dtype=float)
     if centers.shape != (len(radii), 3) or not len(radii) or not np.isfinite(centers).all():
@@ -195,6 +195,8 @@ def refine(vertices, faces, centers, radii, resolution=128, iterations=100):
     scale = np.ptp((v - shift) @ basis, axis=0).max()
     x = (v - shift) @ basis / scale
     c0, r0 = (centers - shift) @ basis / scale, radii / scale
+    plane_normal = basis[2, :]
+    plane_offset = None if minimum_z is None else (minimum_z - shift[2]) / scale
     hull = SilhouetteHull.from_mesh(x, f, resolution)
     train = (train_world - shift) @ basis / scale
     envelope_dirs = directions()
@@ -238,6 +240,11 @@ def refine(vertices, faces, centers, radii, resolution=128, iterations=100):
         loss += 10 * np.mean(over**2)
         grad[:, :3] += 20 / over.size * over @ envelope_dirs
         grad[:, 3] += 20 / over.size * over.sum(axis=1)
+        if plane_offset is not None:
+            below = np.maximum(plane_offset - c @ plane_normal + r, 0)
+            loss += 10 * np.mean(below**2)
+            grad[:, :3] -= (20 / n * below[:, None]) * plane_normal
+            grad[:, 3] += 20 / n * below
         return float(loss), grad.ravel()
 
     initial = np.c_[c0, r0].ravel()
@@ -278,6 +285,8 @@ def refine(vertices, faces, centers, radii, resolution=128, iterations=100):
             result = (initial + fraction * (solved.x - initial)).reshape(n, 4)
             c, r = result[:, :3], result[:, 3]
             caps = np.min(support + 0.025 - c @ envelope_dirs.T, axis=1)
+            if plane_offset is not None:
+                caps = np.minimum(caps, c @ plane_normal - plane_offset)
             if (caps > 1e-5).all():
                 r = np.minimum(r, caps)
                 candidates.append((c, r, f"{source}_w{exterior_weight}_step{fraction}"))

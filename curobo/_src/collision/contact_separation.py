@@ -121,11 +121,16 @@ class ContactSeparation:
             else None
         )
         self.initial_clearance = self.clearance(self.initial_spheres)
-        if bool((self.initial_clearance < -declaration.max_initial_penetration).any()):
+        # Use the declared gap tolerance at endpoint admission as well as along
+        # the path. Exact-boundary contacts can round slightly inward in float32.
+        penetration_limit = declaration.max_initial_penetration + declaration.numerical_tolerance
+        if bool((self.initial_clearance < -penetration_limit).any()):
             raise _ContactPenetrationError(
                 "StartContact initial penetration exceeds its declared geometry tolerance: "
                 f"{float(-self.initial_clearance.min()):.6f} m > "
-                f"{declaration.max_initial_penetration:.6f} m at {declaration.obstacle_name!r}"
+                f"{declaration.max_initial_penetration:.6f} m + "
+                f"{declaration.numerical_tolerance:.6f} m numerical tolerance "
+                f"at {declaration.obstacle_name!r}"
             )
         if bool((self.initial_clearance > declaration.numerical_tolerance).any()):
             log_and_raise("StartContact may only replace spheres actually touching the support")

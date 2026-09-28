@@ -138,9 +138,10 @@ def fit_spheres_to_mesh(
             (default) disables clipping.
         device_cfg: Device and floating-point dtype for the returned spheres.
         max_bottom_protrusion_m: Optional nonnegative bound below the mesh's
-            minimum local Z. Hard-clamps sphere radii without moving centers,
-            removes spheres entirely below the bound, and preserves the bound
-            after dtype conversion. Metrics describe the final clipped spheres.
+            minimum local Z. FAST considers this plane during fitting and
+            candidate selection. Final clipping clamps radii, removes spheres
+            entirely below the bound, and preserves it after dtype conversion.
+            Metrics describe the final clipped spheres.
             This is an object-local plane, not a world-gravity constraint.
 
     Returns:
@@ -190,7 +191,12 @@ def fit_spheres_to_mesh(
 
         if isinstance(num_spheres, bool) or not isinstance(num_spheres, (int, numpy.integer)):
             raise ValueError("FAST num_spheres must be an integer budget in [1, 256]")
-        n_pts, n_radius, fast_diagnostics = fast_fit_mesh(mesh, num_spheres)
+        if bottom_plane is None:
+            n_pts, n_radius, fast_diagnostics = fast_fit_mesh(mesh, num_spheres)
+        else:
+            n_pts, n_radius, fast_diagnostics = fast_fit_mesh(
+                mesh, num_spheres, minimum_z=bottom_plane[1]
+            )
 
     elif fit_type == SphereFitType.SURFACE:
         n_pts, n_radius = sample_even_fit_mesh(mesh, num_spheres, surface_radius)

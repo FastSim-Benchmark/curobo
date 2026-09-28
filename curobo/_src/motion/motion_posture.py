@@ -181,6 +181,17 @@ def plan_posture(
                     goals, current_state, max_attempts, max_attempts,
                     posture_seeds=PostureSeeds(planner, current_state, positions, mask, held),
                 )
+                if result is not None and not bool(result.success.any()):
+                    from curobo._src.motion.motion_failure_diagnostics import (
+                        terminal_failure_summary,
+                    )
+                    from curobo._src.util.logging import log_warn
+
+                    # Capture both grids before releasing the request's contact
+                    # scope: coarse feasibility does not certify the dense path.
+                    for kind in ("optimized", "interpolated"):
+                        evidence = terminal_failure_summary(planner, result, trajectory_kind=kind)
+                        log_warn(f"Posture {kind} trajectory failure evidence: {evidence}")
         if result is None:
             return result
         trajectory = result.get_interpolated_plan().reorder(planner.joint_names)

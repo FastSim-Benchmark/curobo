@@ -64,12 +64,61 @@ def contact_goal_seed(
 def contact_goal_candidates(
     planner: MotionPlanner, goals: GoalToolPose, current: JointState
 ) -> Iterator[JointState]:
-    """Obtain kinematic endpoint evidence, then restore full scene checks.
+    """Propose scene-guided payload endpoints before kinematic contact seeds.
 
     This candidate is never executed or accepted as a trajectory. The subsequent
     contact-aware goal IK, trajectory optimization, and metrics must all succeed.
-    Self collision and joint limits remain active while constructing this seed.
+    Payload geometry is restored before contact capture or yielding a candidate.
+    The final endpoint metrics include its self and environment collisions.
     """
+    yield from _payload_goal_candidates(planner, goals, current)
+    yield from _kinematic_goal_candidates(planner, goals, current)
+
+
+def _payload_goal_candidates(
+    planner: MotionPlanner, goals: GoalToolPose, current: JointState
+) -> Iterator[JointState]:
+    """Guide the body around the scene without penalizing unknown payload contact.
+
+    Only the attached link's sphere radii are suspended for one proposal solve.
+    Scene obstacles, body spheres, held coordinates and joint limits stay active.
+    This avoids spending all seeds on base/body poses inside furniture merely
+    because the payload's shallow support contact has not yet been captured.
+    """
+    manager = getattr(planner, "attachment_manager", None)
+    link = None if manager is None else manager._attached_link_name
+    if link is None:
+        return
+    params = manager.kinematics_params
+    indices = params.get_sphere_index_from_link_name(link)
+    saved = params.link_spheres[:, indices, :].clone()
+    if not bool((saved[..., 3] > 0).any()):
+        return
+    core = planner.ik_solver.core
+    core.invalidate_parameter_graphs()
+    try:
+        params.link_spheres[:, indices, 3] = -100.0
+        result = planner.ik_solver.solve_pose(
+            goals, return_seeds=planner.ik_solver.config.num_seeds, current_state=current
+        )
+    finally:
+        params.link_spheres[:, indices, :] = saved
+        core.invalidate_parameter_graphs()
+    # Do not yield inside the suspension scope: consumers can stop iteration as
+    # soon as their finite trajectory budget is exhausted.
+    for position in result.solution[result.success]:
+        state = JointState.from_position(position.reshape(1, -1), joint_names=planner.joint_names)
+        try:
+            capture_contact(planner, state, terminal=True)
+        except (_ContactPenetrationError, _AmbiguousGoalContactError):
+            continue
+        yield state
+
+
+def _kinematic_goal_candidates(
+    planner: MotionPlanner, goals: GoalToolPose, current: JointState
+) -> Iterator[JointState]:
+    """Retain the bounded kinematic proposal path for other endpoint contacts."""
     costs = scene_costs(planner.ik_solver)
     enabled = [cost for cost in costs if cost.enabled]
     weights = [cost._weight.clone() for cost in enabled]
