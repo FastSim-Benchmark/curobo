@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 # Standard Library
+from dataclasses import replace
 from typing import TYPE_CHECKING, Optional
 
 # Third Party
@@ -27,6 +28,55 @@ class SelfCollisionCost(BaseCost):
         super().__init__(config)
 
         self._batch_size = None
+        self._active_pair_cache = None
+        self._active_pair_buffers = None
+
+    def _query_pair_config(self, robot_spheres):
+        """Prune only pairs disabled in every query, outside graph capture.
+
+        Captured graphs and pair-distance diagnostics retain the full table so
+        replay can activate arbitrary spheres and diagnostic columns stay stable.
+        Radius support is checked on every eager call, including every environment
+        and trajectory sample. No position-based collision exclusion is cached.
+        """
+        config = self.config.self_collision_kin_config
+        pairs = config.collision_pairs
+        padding = config.sphere_padding
+        if (
+            self.config.store_pair_distance
+            or pairs.shape[0] < 4096
+            or not robot_spheres.is_cuda
+            or torch.cuda.is_current_stream_capturing()
+            or torch.compiler.is_compiling()
+            or torch.is_inference(pairs)
+            or torch.is_inference(padding)
+        ):
+            return config
+        with torch.no_grad():
+            # Preserve the original kernel's behavior for nonfinite inputs.
+            if not bool(torch.isfinite(robot_spheres).all()):
+                return config
+            effective = robot_spheres[..., 3] + padding
+            # Retain nonfinite padding rather than using it to exclude a pair.
+            active = (~(effective < 0)).any(dim=(0, 1))
+            key = (id(config), id(pairs), pairs._version, id(padding), padding._version)
+            cached = self._active_pair_cache
+            if cached is not None and cached[0] == key and torch.equal(cached[1], active):
+                return cached[2]
+            retained = []
+            for chunk in pairs.split(1_000_000):
+                indices = chunk.long()
+                retained.append(chunk[active[indices[:, 0]] & active[indices[:, 1]]])
+            filtered = torch.cat(retained).contiguous()
+            # The native reduction expects at least one block. Empty tables use
+            # the original disabled-pair path, which also clears stale gradients.
+            selected = (
+                replace(config, collision_pairs=filtered)
+                if 0 < filtered.shape[0] < pairs.shape[0]
+                else config
+            )
+            self._active_pair_cache = (key, active, selected, config, pairs, padding)
+            return selected
 
     def setup_batch_tensors(self, batch_size: int, horizon: int):
         # Assuming n stays constant
@@ -107,6 +157,18 @@ class SelfCollisionCost(BaseCost):
         """
         self.validate_input(robot_spheres)
 
+        pair_config = self._query_pair_config(robot_spheres)
+        block_values = self._block_batch_max_value
+        block_indices = self._block_batch_max_index
+        if pair_config is not self.config.self_collision_kin_config:
+            shape = (self._batch_size, self._horizon, pair_config.num_blocks_per_batch)
+            if self._active_pair_buffers is None or self._active_pair_buffers[0].shape != shape:
+                self._active_pair_buffers = (
+                    torch.zeros(shape, device=robot_spheres.device, dtype=robot_spheres.dtype),
+                    torch.zeros((*shape, 2), device=robot_spheres.device, dtype=torch.int16),
+                )
+            block_values, block_indices = self._active_pair_buffers
+
         dist = SelfCollisionDistance.apply(
             robot_spheres,
             self._out_distance,
@@ -115,11 +177,11 @@ class SelfCollisionCost(BaseCost):
             self._sparse_sphere_idx,
             self._weight,
             self.config.self_collision_kin_config.sphere_padding,
-            self.config.self_collision_kin_config.collision_pairs,
-            self._block_batch_max_value,
-            self._block_batch_max_index,
-            self.config.self_collision_kin_config.num_blocks_per_batch,
-            self.config.self_collision_kin_config.max_threads_per_block,
+            pair_config.collision_pairs,
+            block_values,
+            block_indices,
+            pair_config.num_blocks_per_batch,
+            pair_config.max_threads_per_block,
             self.config.store_pair_distance,
             self.config.use_grad_input,
         )

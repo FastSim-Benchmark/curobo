@@ -174,6 +174,9 @@ def test_self_collision_uses_enabled_pairs_and_distinguishes_padding(padding, ex
     summary = terminal_failure_summary(planner, result)["raw_self_collision_sample"]
     assert sampled == [3., 5.]
     assert summary["acceptance_modified"] is False
+    assert summary["joint_names"] == ["joint"]
+    assert summary["sphere_frame"] == "kinematics_model"
+    assert [sample["joint_position"] for sample in summary["samples"]] == [[3.], [5.]]
     for sample in summary["samples"]:
         assert sample["collision_pair_count"] == expected
         assert len(sample["pairs"]) == expected
@@ -182,4 +185,5 @@ def test_self_collision_uses_enabled_pairs_and_distinguishes_padding(padding, ex
             assert pair["links"] == ["finger", "attached_object"]
             assert pair["raw_overlap_m"] == pytest.approx(-.01)
             assert pair["padded_overlap_m"] == pytest.approx(.03)
+            torch.testing.assert_close(torch.tensor(pair["sphere_xyzr"]), spheres[:2])
     torch.testing.assert_close(before, spheres)

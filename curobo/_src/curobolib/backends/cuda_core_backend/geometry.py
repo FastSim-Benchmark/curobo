@@ -7,6 +7,9 @@
 Only self-collision uses CUDA kernels. World collision (OBB, voxel) uses Warp.
 """
 
+# Standard Library
+from functools import lru_cache
+
 # Third Party
 import torch
 from cuda.core import LaunchConfig
@@ -16,11 +19,39 @@ from curobo._src.context import get_runtime
 from curobo._src.curobolib.backends.cuda_core_backend.geometry_config import GeometryKernelCfg
 from curobo._src.curobolib.backends.cuda_core_backend.launch_helper import launch_kernel
 from curobo._src.curobolib.backends.cuda_core_backend.util import ceil_div
-from curobo._src.util.logging import log_and_raise
-
+from curobo._src.util.logging import log_and_raise, log_info
 
 COLLISION_PAIR_SIZE = 8  # sizeof(CollisionPair): float(4) + int16(2) + int16(2)
 STATIC_SMEM_OVERHEAD = COLLISION_PAIR_SIZE * 33  # block_reduce_shared_data[32] + reduced_max_d
+
+
+@lru_cache(maxsize=None)
+def _device_max_shared_memory(device_id: int) -> int:
+    import cuda.bindings.runtime as cudart
+
+    (err, device_max_smem) = cudart.cudaDeviceGetAttribute(
+        cudart.cudaDeviceAttr.cudaDevAttrMaxSharedMemoryPerBlockOptin, device_id
+    )
+    if err != cudart.cudaError_t.cudaSuccess:
+        log_and_raise(f"Failed to query device max shared memory: {err}")
+    return device_max_smem
+
+
+@lru_cache(maxsize=64)
+def _report_global_sphere_reads(device_id: int, nspheres: int) -> None:
+    log_info(
+        f"Self-collision uses global-memory sphere reads for {nspheres} spheres "
+        f"on CUDA device {device_id}; all configured collision pairs remain active."
+    )
+
+
+def _sphere_shared_memory_size(nspheres: int) -> int:
+    device_id = torch.cuda.current_device()
+    size = 16 * nspheres
+    if size + STATIC_SMEM_OVERHEAD <= _device_max_shared_memory(device_id):
+        return size
+    _report_global_sphere_reads(device_id, nspheres)
+    return 0
 
 
 def _validate_and_configure_shared_memory(
@@ -29,13 +60,7 @@ def _validate_and_configure_shared_memory(
     import cuda.bindings.runtime as cudart
 
     total_smem = dynamic_smemsize + STATIC_SMEM_OVERHEAD
-
-    device_id = torch.cuda.current_device()
-    (err, device_max_smem) = cudart.cudaDeviceGetAttribute(
-        cudart.cudaDeviceAttr.cudaDevAttrMaxSharedMemoryPerBlockOptin, device_id
-    )
-    if err != cudart.cudaError_t.cudaSuccess:
-        log_and_raise(f"Failed to query device max shared memory: {err}")
+    device_max_smem = _device_max_shared_memory(torch.cuda.current_device())
 
     if total_smem > device_max_smem:
         max_nspheres = (device_max_smem - STATIC_SMEM_OVERHEAD) // 16  # sizeof(float4)
@@ -55,8 +80,7 @@ def _validate_and_configure_shared_memory(
         )
         if err[0] != cudart.cudaError_t.cudaSuccess:
             log_and_raise(
-                f"cudaFuncSetAttribute failed for self-collision kernel "
-                f"{kernel_name}: {err}"
+                f"cudaFuncSetAttribute failed for self-collision kernel {kernel_name}: {err}"
             )
 
 
@@ -85,31 +109,30 @@ def self_collision_distance(
     This function has the EXACT same signature as the PyBind11 version
     to ensure seamless backend swapping.
 
-    Args:
-        All tensor arguments and parameters as expected by self-collision kernel
-
     Note:
         Modifies output tensors in-place
     """
     runtime = get_runtime()
     cache = runtime.get_cuda_core_cache()
     kernel_config = GeometryKernelCfg()
+    smemsize = _sphere_shared_memory_size(nspheres)
+    shared = str(smemsize != 0).lower()
 
     if num_blocks_per_batch == 1:
         num_blocks = batch_size * horizon
 
-        num_checks_per_thread = ceil_div(num_collision_pairs, max_threads_per_block)
         num_threads_per_block = min(max_threads_per_block, num_collision_pairs)
 
         warp_size = 32
         num_threads_per_block = ceil_div(num_threads_per_block, warp_size) * warp_size
         num_threads_per_block = min(num_threads_per_block, max_threads_per_block)
 
-        smemsize = 4 * 4 * nspheres  # sizeof(float4) * nspheres
-
         config = LaunchConfig(grid=num_blocks, block=num_threads_per_block, shmem_size=smemsize)
 
-        kernel_name = f"curobo::geometry::self_collision::self_collision_max_distance_kernel<{str(store_pair_distance).lower()}>"
+        kernel_name = (
+            "curobo::geometry::self_collision::self_collision_max_distance_kernel"
+            f"<{str(store_pair_distance).lower()}, {shared}>"
+        )
 
         kernel_files = [
             kernel_config.kernel_dir / f for f in kernel_config.get_kernel_files("self_collision")
@@ -144,8 +167,6 @@ def self_collision_distance(
         launch_kernel(kernel_name, stream, config, kernel, *kernel_args)
 
     else:
-        smemsize = 4 * 4 * nspheres  # sizeof(float4) * nspheres
-
         num_blocks_first_kernel = batch_size * horizon * num_blocks_per_batch
         num_threads_per_block_first_kernel = max_threads_per_block
 
@@ -155,7 +176,10 @@ def self_collision_distance(
             shmem_size=smemsize,
         )
 
-        kernel_name_first = f"curobo::geometry::self_collision::self_collision_max_block_kernel<{str(store_pair_distance).lower()}>"
+        kernel_name_first = (
+            "curobo::geometry::self_collision::self_collision_max_block_kernel"
+            f"<{str(store_pair_distance).lower()}, {shared}>"
+        )
 
         kernel_files = [
             kernel_config.kernel_dir / f for f in kernel_config.get_kernel_files("self_collision")
@@ -224,4 +248,6 @@ def self_collision_distance(
             compute_grad,
         )
 
-        launch_kernel(kernel_name_second, stream, config_second, kernel_second, *kernel_args_second)
+        launch_kernel(
+            kernel_name_second, stream, config_second, kernel_second, *kernel_args_second
+        )

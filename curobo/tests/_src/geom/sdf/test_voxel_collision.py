@@ -502,7 +502,7 @@ def _launch_collision(
     max_n = voxel_data.max_n
     wp.launch(
         kernel=sphere_obstacle_collision_kernel,
-        dim=b * h * n * max_n,
+        dim=(b * h * n, max_n),
         inputs=[
             data_wp, spheres_wp, weight_wp, eta_wp, env_idx_wp,
             out_cost_wp, out_grad_wp,
@@ -557,7 +557,7 @@ def _launch_swept_collision(
     max_n = voxel_data.max_n
     wp.launch(
         kernel=swept_sphere_obstacle_collision_kernel,
-        dim=b * h * n * max_n,
+        dim=(b * h * n, max_n),
         inputs=[
             data_wp, spheres_wp, weight_wp, eta_wp, env_idx_wp,
             out_cost_wp, out_grad_wp,

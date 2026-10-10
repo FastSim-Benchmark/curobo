@@ -106,9 +106,15 @@ def test_pose_motion_holds_arbitrary_tool_local_axis_and_clears_on_exception(pla
         def fail(*args, **kwargs):
             raise RuntimeError("injected planning failure")
 
-        patch.setattr(planner, "_plan_pose", fail)
+        original_limits = planner.kinematics.get_joint_limits().position.clone()
+        # Both continuous seeds and ordinary planning use native IK. Inject at
+        # that shared boundary so a successful seed cannot bypass the failure.
+        patch.setattr(planner.ik_solver, "solve_pose", fail)
         with pytest.raises(RuntimeError, match="injected"):
             planner.plan_pose(goal, start, hold_axis=hold)
+        torch.testing.assert_close(
+            planner.kinematics.get_joint_limits().position, original_limits, rtol=0, atol=0,
+        )
     for solver in (planner.ik_solver, planner.trajopt_solver):
         for rollout in [
             *solver.core.get_all_rollout_instances(),

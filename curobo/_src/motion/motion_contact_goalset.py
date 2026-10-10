@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from curobo._src.motion.motion_contact import boundary_contact_scope, contact_goal_candidates
 from curobo._src.motion.motion_goalset import goal_group, remap_goalset_index
 from curobo._src.util.logging import log_warn
+from curobo._src.util.time_budget import check_time_budget
 
 if TYPE_CHECKING:
     from curobo._src.motion.motion_planner import MotionPlanner
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 def _candidate_batches(planner, target, current, max_attempts, summary):
     """Spend the existing attempt budget on fresh proposals when a batch dries up."""
     for batch_index in range(max_attempts):
+        check_time_budget()
         summary["proposal_batch_count"] += 1
         for endpoint in contact_goal_candidates(planner, target, current):
             yield batch_index, endpoint
@@ -54,6 +56,7 @@ def plan_terminal_pose(
     }
     last_result = None
     for index in range(budget):
+        check_time_budget()
         target = goal_group(goals, index)
         summary["attempted_goal_indices"].append(index)
         candidates = _candidate_batches(planner, target, current, max_attempts, summary)

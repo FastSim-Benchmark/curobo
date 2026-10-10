@@ -651,3 +651,38 @@ def compute_local_sdf_with_grad(
                 gz = 1.0
 
     return wp.vec4(sdf, gx, gy, gz)
+
+
+def query_aabb_overlaps(
+    obs_set: CuboidDataWarp,
+    env_idx: wp.int32,
+    local_idx: wp.int32,
+    query_lower: wp.vec3,
+    query_upper: wp.vec3,
+    radius: wp.float32,
+) -> bool:
+    """Conservatively reject bounds outside the analytic box, including sweeps."""
+    index = env_idx * obs_set.max_n + local_idx
+    if not wp.isfinite(radius):
+        return True
+    for axis in range(3):
+        half = obs_set.dims[index, axis] * 0.5
+        lower = query_lower[axis]
+        upper = query_upper[axis]
+        if (
+            not wp.isfinite(half)
+            or not wp.isfinite(lower)
+            or not wp.isfinite(upper)
+            or half < 0.0
+            or lower > upper
+        ):
+            return True
+    for axis in range(3):
+        half = obs_set.dims[index, axis] * 0.5
+        lower = query_lower[axis]
+        upper = query_upper[axis]
+        scale = wp.max(1.0, wp.max(wp.abs(lower), wp.max(wp.abs(upper), half)))
+        margin = wp.max(radius, 0.0) + 3.814697265625e-6 * scale
+        if lower > half + margin or upper < -half - margin:
+            return False
+    return True

@@ -37,8 +37,13 @@ def test_refinement_count_factory_preserves_configuration(monkeypatch, value) ->
 @pytest.mark.parametrize("branch", ["single", "graph_pose", "goalset", "cspace", "graph_cspace"])
 @pytest.mark.parametrize("success", [True, False])
 def test_public_planning_preserves_branch_defaults_and_forwards_override(
-    value, branch: str, success: bool,
+    monkeypatch, value, branch: str, success: bool,
 ) -> None:
+    # This test owns the initial solver-call forwarding contract. The bounded
+    # goal-set fallback has separate native tests and needs a complete planner.
+    monkeypatch.setattr(
+        "curobo._src.motion.motion_goalset.plan_goalset_fallback", lambda *args: None,
+    )
     planner = MotionPlanner.__new__(MotionPlanner)
     planner._destroyed = True
     planner.config = MotionPlannerCfg(None, None, trajopt_finetune_attempts=value)

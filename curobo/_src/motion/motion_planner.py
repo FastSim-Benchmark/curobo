@@ -32,6 +32,7 @@ from curobo._src.types.axis_hold import AxisHold
 from curobo._src.types.pose import Pose
 from curobo._src.types.tool_pose import GoalToolPose, ToolPose
 from curobo._src.util.logging import log_and_raise, log_warn
+from curobo._src.util.time_budget import check_time_budget, planning_time_budget
 
 
 def _axis_string_to_vector(axis: str) -> List[float]:
@@ -254,6 +255,7 @@ class MotionPlanner:
 
     # -- Planning --
 
+    @planning_time_budget
     def plan_pose(
         self,
         goal_tool_poses: GoalToolPose,
@@ -264,6 +266,7 @@ class MotionPlanner:
         *,
         hold_axis: Optional[Dict[str, AxisHold]] = None,
         allow_boundary_collision: str = "none",
+        timeout_s: float | None = None,
     ) -> Optional[TrajOptSolverResult]:
         """Plan to poses with an optional start-referenced axis hold per tool.
 
@@ -280,6 +283,22 @@ class MotionPlanner:
 
         validate_boundary_mode(allow_boundary_collision)
         with self._hold_axis_scope(hold_axis, current_state):
+            if hold_axis and allow_boundary_collision == "none" and max_attempts > 0:
+                from curobo._src.motion.axis_seeds import plan_continuous_axis_seed
+
+                continuous = plan_continuous_axis_seed(
+                    self, goal_tool_poses, current_state, hold_axis, use_implicit_goal,
+                )
+                if continuous is not None and bool(continuous.success.any()):
+                    return continuous
+            if hold_axis and allow_boundary_collision == "end" and max_attempts > 0:
+                from curobo._src.motion.contact_axis_seeds import plan_contact_axis_seed
+
+                continuous = plan_contact_axis_seed(
+                    self, goal_tool_poses, current_state, hold_axis, use_implicit_goal,
+                )
+                if continuous is not None and bool(continuous.success.any()):
+                    return continuous
             if allow_boundary_collision in {"end", "both"}:
                 from curobo._src.motion.motion_contact_goalset import plan_terminal_pose
 
@@ -343,6 +362,7 @@ class MotionPlanner:
         num_seeds = self.trajopt_solver.config.num_seeds
 
         for current_attempt in range(max_attempts):
+            check_time_budget()
             current_state = og_current_state.clone()
             ik_seed_kwargs = (
                 {"seed_config": posture_seeds.endpoint_seeds(current_attempt)}
@@ -434,6 +454,7 @@ class MotionPlanner:
         trajopt_result = None
         ik_result = None
         for _ in range(max_attempts):
+            check_time_budget()
             ik_result = self.ik_solver.solve_pose(
                 goal_tool_poses,
                 return_seeds=self.trajopt_solver.config.num_seeds,
@@ -472,6 +493,7 @@ class MotionPlanner:
                 return fallback
         return trajopt_result
 
+    @planning_time_budget
     def plan_posture(
         self,
         goal_states: JointState,
@@ -485,6 +507,7 @@ class MotionPlanner:
         allow_boundary_collision: str = "none",
         max_initial_penetration: float = 0.002,
         contact_links: tuple[str, ...] | None = None,
+        timeout_s: float | None = None,
     ) -> Optional[TrajOptSolverResult]:
         """Plan to a partial joint goal set; free and held coordinates are explicit.
 
@@ -499,6 +522,7 @@ class MotionPlanner:
             max_initial_penetration=max_initial_penetration, contact_links=contact_links,
         )
 
+    @planning_time_budget
     def plan_cspace(
         self,
         goal_state: JointState,
@@ -508,6 +532,7 @@ class MotionPlanner:
         *,
         hold_axis: Optional[Dict[str, AxisHold]] = None,
         allow_boundary_collision: str = "none",
+        timeout_s: float | None = None,
     ) -> Optional[TrajOptSolverResult]:
         """Plan to exact joints, optionally holding a tool axis from the start.
 
@@ -564,6 +589,7 @@ class MotionPlanner:
         num_seeds = self.trajopt_solver.config.num_seeds
 
         for current_attempt in range(max_attempts):
+            check_time_budget()
             current_state = og_current_state.clone()
             seed_traj = None
             finetune_attempts = 3

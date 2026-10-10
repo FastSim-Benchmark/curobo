@@ -16,7 +16,7 @@ namespace curobo{
 
 
 
-    template<bool STORE_PAIR_DISTANCE>
+    template<bool STORE_PAIR_DISTANCE, bool LOAD_SPHERES_FROM_SHARED=true>
     __global__ void self_collision_max_distance_kernel(
       float *out_distance,        // batch x 1
       float *out_gradient,             // batch x nspheres x 4
@@ -57,7 +57,8 @@ namespace curobo{
 
 
       // Load spheres into shared memory and initialize gradients
-      load_spheres_and_zero_gradients(
+      if (LOAD_SPHERES_FROM_SHARED) {
+        load_spheres_and_zero_gradients(
         spheres_shared,
         out_gradient,
         sparse_index,
@@ -66,13 +67,19 @@ namespace curobo{
         batch_horizon_idx,
         num_spheres,
         num_threads_per_block);
+      } else {
+        zero_gradients(out_gradient, sparse_index, batch_horizon_idx, num_spheres, num_threads_per_block);
+      }
 
 
       __syncthreads();
 
       // Call the new device function to compute max distance
-      CollisionPair max_d = compute_max_collision_distance<STORE_PAIR_DISTANCE>(
-        spheres_shared,
+      const float4* spheres = LOAD_SPHERES_FROM_SHARED ? spheres_shared : reinterpret_cast<const float4*>(robot_spheres);
+      CollisionPair max_d = compute_max_collision_distance<STORE_PAIR_DISTANCE, LOAD_SPHERES_FROM_SHARED>(
+        spheres,
+        offsets,
+        num_spheres,
         pair_distance,
         pair_locations,
         batch_horizon_idx,
@@ -90,9 +97,9 @@ namespace curobo{
 
 
       // Process final collision results
-      finalize_collision_results<true>(
+      finalize_collision_results<LOAD_SPHERES_FROM_SHARED>(
         max_d,
-        spheres_shared,
+        spheres,
         offsets,
         out_distance,
         out_gradient,
@@ -110,7 +117,7 @@ namespace curobo{
 
     } // end of kernel
 
- template<bool STORE_PAIR_DISTANCE>
+ template<bool STORE_PAIR_DISTANCE, bool LOAD_SPHERES_FROM_SHARED=true>
     __global__ void self_collision_max_block_kernel(
       float *out_gradient,             // batch x nspheres x 4
       float *pair_distance,       // batch x num_collision_pairs * 2
@@ -152,20 +159,25 @@ namespace curobo{
       const uint32_t num_threads_per_block = blockDim.x;
       const uint32_t num_collision_pairs_per_block = curobo::common::ceil_div(num_collision_pairs, num_blocks_per_batch);
 
-      load_spheres(
+      if (LOAD_SPHERES_FROM_SHARED) {
+        load_spheres(
         spheres_shared,
         robot_spheres,
         offsets,
         batch_horizon_idx,
         num_spheres,
         num_threads_per_block);
+      }
 
       __syncthreads();
 
       const int start_index = local_block_idx * num_collision_pairs_per_block;
       // Call the new device function to compute max distance
-      CollisionPair max_d = compute_max_collision_distance<STORE_PAIR_DISTANCE>(
-        spheres_shared,
+      const float4* spheres = LOAD_SPHERES_FROM_SHARED ? spheres_shared : reinterpret_cast<const float4*>(robot_spheres);
+      CollisionPair max_d = compute_max_collision_distance<STORE_PAIR_DISTANCE, LOAD_SPHERES_FROM_SHARED>(
+        spheres,
+        offsets,
+        num_spheres,
         pair_distance,
         pair_locations,
         batch_horizon_idx,

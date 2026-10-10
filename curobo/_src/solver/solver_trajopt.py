@@ -9,6 +9,8 @@ solution ranking. Supports both Cartesian-space (solve_pose) and configuration-s
 """
 from __future__ import annotations
 
+from functools import wraps
+
 # Standard Library
 from typing import Dict, Optional, Tuple
 
@@ -34,9 +36,30 @@ from curobo._src.types.tool_pose import GoalToolPose, ToolPose
 from curobo._src.util.cuda_event_timer import CudaEventTimer
 from curobo._src.util.interpolation_roundoff import project_interpolation_position_roundoff
 from curobo._src.util.logging import log_and_raise, log_warn
+from curobo._src.util.time_budget import check_time_budget
 from curobo._src.util.torch_util import get_torch_jit_decorator
 from curobo._src.util.trajectory import calculate_dt_no_clamp, get_batch_interpolated_trajectory
 from curobo._src.util.trajectory_seed_generator import TrajectorySeedGenerator
+
+
+def _restore_optimizer_settings_on_error(method):
+    """Restore temporary optimizer settings when a solve cannot return a result."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        saved = [(optimizer, optimizer.enabled, getattr(optimizer.config, "num_iters", None))
+                 for optimizer in self.optimizer.optimizers]
+        try:
+            return method(self, *args, **kwargs)
+        except BaseException:
+            for optimizer, enabled, iterations in saved:
+                if iterations is not None:
+                    optimizer.update_niters(iterations)
+                if enabled:
+                    optimizer.enable()
+                else:
+                    optimizer.disable()
+            raise
+    return wrapped
 
 
 class TrajOptSolver:
@@ -257,6 +280,7 @@ class TrajOptSolver:
     # -------------------------------------------------------------------
 
     @profiler.record_function("trajopt_solver/_solve_impl")
+    @_restore_optimizer_settings_on_error
     def _solve_impl(
         self,
         current_state: JointState,
@@ -291,6 +315,7 @@ class TrajOptSolver:
             seed_config=seed_config,
             seed_traj=seed_traj,
         )
+        initial_action_seed = action_seed.clone()
         with profiler.record_function("trajopt_solver/calculate_seed_goal_state"):
             seed_goal_state = action_seed[..., -1, :].view(-1, self.action_dim)
             seed_goal_state = seed_goal_state.view(solve_state.batch_size, num_seeds, self.action_dim)
@@ -337,6 +362,7 @@ class TrajOptSolver:
         goal_buffer = None
 
         for i in range(finetune_attempts + 1):
+            check_time_budget()
             if curobo_runtime.debug:
                 if best_trajopt_result is not None:
                     if torch.max(best_trajopt_result.seed_rank) >= best_trajopt_result.num_seeds:
@@ -460,11 +486,55 @@ class TrajOptSolver:
             if i == 0 and torch.count_nonzero(best_trajopt_result.success) == 0:
                 break
 
+        if not bool(best_trajopt_result.success.any()):
+            recovered = self._validate_retimed_initial_seed(
+                initial_action_seed, num_seeds, goal_buffer,
+            )
+            seed_success = bool(recovered.success.any())
+            recovery = {
+                "optimized_candidate_success": False,
+                "retimed_seed_success": seed_success,
+            }
+            if seed_success:
+                best_trajopt_result = recovered
+            else:
+                recovery["seed_constraint_maxima"] = (
+                    recovered.get_topk_seeds(1).debug_info or {}
+                ).get("selected_constraint_maxima", {})
+            debug = dict(best_trajopt_result.debug_info or {})
+            debug["initial_seed_recovery"] = recovery
+            best_trajopt_result.debug_info = debug
         best_trajopt_result.process_metrics_and_rank_seeds()
         best_trajopt_result = self._get_best_result(best_trajopt_result, return_seeds)
         best_trajopt_result.solve_time = opt_time
         best_trajopt_result.total_time = total_timer.stop()
         return best_trajopt_result
+
+    def _validate_retimed_initial_seed(self, seed, num_seeds, goal_buffer):
+        """Recover only seeds passing the ordinary optimized and dense checks.
+
+        A soft clearance or timing objective can move a geometrically valid seed
+        into an infeasible local minimum. Recompute its timing with the existing
+        derivative limits, then require the same endpoint, contact, axis, joint
+        and interpolated collision metrics used for optimized trajectories.
+        """
+        check_time_budget()
+        state = self.metrics_rollout.compute_state_from_action(seed)
+        dt = self.compute_trajectory_dt(state.joint_state, scale_dt=True).view(
+            self.solve_state.batch_size, num_seeds,
+        )
+        self._update_trajectory_dt(dt, goal_buffer)
+        metrics = self.metrics_rollout.compute_metrics_from_action(seed)
+        joints = metrics.state.joint_state
+        joints.joint_names = self.joint_names
+        joints.knot = metrics.actions
+        joints.knot_dt = joints.dt * self.interpolation_steps
+        dense_metrics, dense, last_step = self._interpolate_and_compute_metrics(joints)
+        result = self._get_result(
+            seed, metrics, dense_metrics, dense, last_step, num_seeds, num_seeds,
+        )
+        check_time_budget()
+        return result
 
     @profiler.record_function("trajopt_solver/_get_best_result")
     @get_torch_jit_decorator(only_valid_for_compile=True, slow_to_compile=True)
@@ -478,6 +548,10 @@ class TrajOptSolver:
         if best_solution.joint_names is None:
             best_solution.joint_names = self.joint_names
         if not bool(best_trajopt_result.success.any()):
+            log_warn(
+                "Rejected trajectory selected constraint maxima: "
+                f"{(best_trajopt_result.debug_info or {}).get('selected_constraint_maxima', {})}"
+            )
             manager = self.metrics_rollout.metrics_constraint_manager
             if manager is not None and manager.has_cost("cspace"):
                 debug = dict(best_trajopt_result.debug_info or {})

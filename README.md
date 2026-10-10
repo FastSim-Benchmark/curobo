@@ -2,6 +2,62 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # cuRobo
 
+## Swept obstacle bounds
+
+Swept mesh and cuboid queries compute conservative world bounds once per query
+from the current obstacle poses and local bounds. Sphere groups reject distant
+obstacles before repeating local-frame transforms. Surviving pairs retain the
+existing local broad phase, sweep samples, collision costs and gradients.
+Nonfinite or invalid bounds retain the original checks. Query-local scratch also
+reads updated poses and dimensions during CUDA graph replay.
+
+Surviving group-obstacle pairs are collected separately from exact sweep
+evaluation, allowing the spheres in each group to run in parallel. Each group
+stores at most 16 candidates; if more survive, evaluation checks every populated
+obstacle instead of truncating the collision query. Contact replacements and
+speed scaling retain their existing semantics. Parallel accumulation can change
+floating-point rounding, particularly after speed-gradient projection.
+
+## Sphere-fit diagnostic precision
+
+Sphere-fit coverage and surface-gap metrics use direct Euclidean distances so
+global TF32 matrix settings cannot introduce false millimeter-scale gaps or
+false coverage. This changes diagnostic measurements only; fitted spheres and
+the independent bounded-volume certificate remain unchanged.
+
+## Continuous seeds for axis-constrained motion
+
+Ordinary non-contact pose queries with an axis hold first try one continuous
+Cartesian seed. Sixteen IK steps search near the previous configuration, using
+joint types to distinguish translation from rotation and intersecting each local
+search box with the original physical limits. Limits are restored on success,
+failure and timeout. Matching targets across tool frames stay paired, and returned
+goal indices refer to the caller's original goal set.
+
+The seed still passes the native endpoint, joint, derivative, self/world collision
+and dense interpolation checks. An unsuccessful seed proceeds to the existing
+bounded search; the original request deadline remains in force. Queries without
+an axis hold, start/both-boundary contact queries and joint-goal planning retain
+their existing paths.
+
+Axis-held end-contact queries first try a nearby physical-limit-bounded endpoint
+and a continuous seed ending at that exact contact configuration. Intermediate
+IK searches preserve local continuity and reachability to the selected endpoint.
+The authored goal remains authoritative for endpoint and native trajectory
+validation. Contact cleanup and physical-limit restoration run on failure too;
+an unavailable or rejected seed retains the existing terminal-contact search
+and the original shared request deadline.
+
+## Recovering an initial trajectory seed
+
+When every optimized trajectory is rejected, TrajOpt also checks its original
+seed after recomputing timing with the configured velocity, acceleration and
+jerk limits. Recovery requires the ordinary endpoint, joint, axis, self-collision,
+scene/contact and dense interpolated checks to pass. It does not change geometry,
+contact tolerances, or planning deadlines. A recovered result records
+`initial_seed_recovery` in its debug information. Successful optimized results
+keep their existing selection and refinement behavior.
+
 ## Trajectory interpolation at joint limits
 
 Dense trajectory validation projects a position excursion of at most one
@@ -17,12 +73,80 @@ scope is still active. Dense collision peaks use the dense state and its own
 metrics rollout. Departure diagnostics distinguish actual support penetration
 from a nonmonotonic clearance change; neither measurement changes acceptance.
 
+Rejected trajectory candidates also log their selected optimized and interpolated
+constraint maxima immediately, before the enclosing search returns. This retains
+the rejection evidence if an end-to-end timeout later discards the search result;
+it does not alter candidate ranking, planning budgets, or acceptance thresholds.
+
 Terminal-contact pose search uses `max_attempts` to bound both fresh endpoint
 proposal batches and captured candidates per target. If a proposal batch contains
 no acceptable endpoint, remaining batches are sampled before moving to another
 target. Endpoint contact validation, exact target/seed binding, and trajectory
 collision and limit checks remain mandatory. Exhausted searches can take longer
 than a single proposal batch; no additional unbounded retry loop is introduced.
+
+## Bounded IK diagnostic memory
+
+Failed IK self-collision diagnostics scan the enabled pair table in bounded
+chunks. Inactive radii are filtered before distance vectors are allocated.
+The report retains the same full positive-pair count and stable top-eight order,
+including ties, while pair indices retain their original width until each chunk
+is indexed. Float64 diagnostic distances and native planning acceptance remain
+unchanged.
+
+## Self-collision initialization
+
+Forward kinematics uses full-width sphere tensor offsets. The former signed
+16-bit float offset wrapped at sphere index 8192, corrupting or rejecting large
+robot/payload models. Forward sphere output, its Jacobian variant, and backward
+tensor addressing preserve complete sphere positions and radii across batches.
+
+Self-collision initialization enumerates eligible sphere pairs with tensor
+operations, preserving pair order and exclusions for detailed robot models.
+Models with no eligible pair produce an empty pair table; oversized sphere
+indices are rejected before conversion to the native int16 representation.
+Collision radii, padding, and runtime acceptance thresholds are unchanged.
+
+Eager self-collision queries compact large pair tables when allocation slots are
+disabled throughout the complete batch and trajectory. Eligibility includes
+radius padding and is rechecked on every call, so attaching, detaching, or
+changing an object's sphere support invalidates the cached selection. Only
+disabled pairs are omitted; active sphere geometry and collision rules remain
+unchanged. CUDA graph capture/replay and per-pair distance diagnostics use the
+complete table. At tied maxima the native reduction may select a different
+valid maximum-pair subgradient after compaction.
+
+Scene collision queries use separate sphere and obstacle thread coordinates.
+Large trajectory batches whose sphere/obstacle pair count exceeds the signed
+32-bit range retain collision costs and gradients for the final query spheres,
+including swept queries. Geometry, contact policy, and collision thresholds are
+unchanged.
+
+Mesh collision queries reject pairs only when the sphere, or the complete adjacent
+swept-segment bounds, lie outside the mesh's local bounds with a rounding guard.
+Interior points and segment crossings remain eligible for the existing narrow
+phase. Bounds follow mesh replacement, removal and reload in stable GPU buffers,
+including CUDA Graph replay. This optimization preserves the existing collision
+cost and gradient; it does not turn the bounded adaptive sweep into an exact
+continuous collision certificate.
+
+For unsigned surface meshes, the broad phase also checks whether any triangle
+bound overlaps the expanded query bounds. This excludes empty space inside a
+room-sized mesh bound without removing geometry or reducing collision radii.
+Signed solid interiors remain eligible even when no surface is nearby. Mesh
+replacement and captured graph replay read the current mesh handle.
+
+Cuboid sweeps also use conservative bounds for groups of adjacent spheres before
+running the unchanged analytic collision query. The bounds include the full
+adjacent sweep, activation radius, and a floating-point guard; solid interiors,
+thin-wall crossings, tangencies, and nonfinite bounds remain eligible. Captured
+graph replay reads current box dimensions and poses rather than cached bounds.
+
+Swept collision also checks the midpoint shared by adjacent half sweeps. The
+adaptive loops previously excluded that boundary, allowing a thin wall crossing
+to return zero cost even though both endpoint queries were correctly clear.
+The midpoint check supplements every original adaptive sample; finite clear
+surfaces, disabled spheres and stationary queries retain their existing meaning.
 
 ## Default sphere fitting in this fork
 
@@ -36,6 +160,19 @@ not a conservative enclosure. Existing saved sphere configurations are unchanged
 Select `SphereFitType.MORPHIT`, `VOXEL`, or `SURFACE` explicitly to retain a legacy
 method. Shared clipping and output device/dtype conversion still apply.
 See [sphere fitting](docs/reference/sphere_fitting.rst) for budgets and diagnostics.
+
+An explicit `SphereFitType.RIM` selection fits a plate's outer convex
+projected contour and its observed rim-height band with 4--50 spheres, without
+a height-to-width cutoff. It uses the complete compound to avoid treating
+internal convex-part seams as rims.
+Returned float32/float64 geometry must retain every assigned contour section
+and the original outer-band vertex witnesses after clipping. The result records
+convex bridging of concavities and does not certify the plate's filled face or
+volume. With an object-local bottom bound, the contour band is intersected with
+the source's real local-Z extent and sphere centers are fitted to the bound;
+post-fit clipping cannot substitute for the coverage proof. This preserves the
+requested sphere capacity. FAST remains the default and retains its existing
+fitting pipeline.
 
 *CUDA Accelerated Robot Library*
 
@@ -238,6 +375,9 @@ up to eight enabled pairs at the optimized start and peak, separating geometric
 overlap from padding, in meters. Disabled spheres are omitted. These samples do
 not replace contact-aware feasibility checks or explain unsampled interpolated
 states. Diagnostic collection does not change collision masks or acceptance.
+Boundary-contact penetration errors also identify the worst global sphere index
+and its captured center and radius, so rejected endpoints can be traced back to
+the robot collision model without relaxing contact tolerances.
 
 Failed IK batches also report constraint maxima for up to eight converged but
 rejected seeds, including seeds outside the optimizer's selected subset. The
@@ -246,3 +386,27 @@ For a single collision environment, up to four such seeds also report eight raw
 mesh gap pairs each using their existing FK spheres. These samples exclude
 disabled spheres and meshes, do not apply contact allowance, and do not describe
 non-mesh obstacles. Unsupported diagnostic environments are marked unavailable.
+
+Self-collision in the CUDA Core backend keeps the shared-memory sphere cache for
+models that fit the device's per-block capacity. Larger models read spheres from
+global memory with the same padding, enabled pairs, reduction, and gradient
+semantics. This retains collision coverage without reducing the robot geometry;
+the existing sphere-index representation limit still applies. Global reads can
+have a different performance cost and do not imply a planning speedup.
+
+World-collision queries traverse populated obstacle slots with a bounded number
+of parallel lanes per sphere. Reserved but unused cache capacity no longer
+requires one GPU thread per sphere-slot pair. Slot IDs, enable flags, contact
+replacements and per-environment counts remain live during CUDA Graph replay;
+this optimization does not remove obstacles or narrow the query geometry.
+Self-collision autograd also scales incoming gradients independently for each
+batch and timestep when gradient-input scaling is enabled.
+
+`MotionPlanner.plan_pose`, `plan_cspace`, and `plan_posture` accept an optional
+positive, finite `timeout_s`. The default `None` retains unbounded wall-clock
+behavior. A budget covers nested proposal, optimization, refinement, and graph
+search stages without restarting on each attempt. Expiry raises `TimeoutError`
+and unwinds temporary constraints and optimizer settings. Checks are cooperative:
+queued optimization chunks finish before the deadline is checked, so this is not
+a hard preemption of a CUDA kernel or native operation. Call-local budget state
+is cleared even on failure, allowing a later request to reuse the planner.

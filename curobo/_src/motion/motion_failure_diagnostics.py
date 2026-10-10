@@ -98,11 +98,15 @@ def _self_collision_sample(planner, state, peak, metrics):
                 rows.append({
                     "links": [links[first], links[second]],
                     "spheres": [first, second],
+                    "sphere_xyzr": spheres[[first, second]].tolist(),
                     "raw_overlap_m": float(raw[index]),
                     "padded_overlap_m": float(padded[index]),
                 })
-        samples.append({"step": step, "collision_pair_count": int(valid.sum()), "pairs": rows})
-    return {"trajectory": trajectory, "samples": samples, "acceptance_modified": False}
+        samples.append({"step": step, "joint_position": selected.position.reshape(-1).tolist(),
+                        "collision_pair_count": int(valid.sum()), "pairs": rows})
+    return {"trajectory": trajectory, "joint_names": list(state.joint_names),
+            "sphere_frame": "kinematics_model", "samples": samples,
+            "acceptance_modified": False}
 
 
 def _departure_gap_summary(contact, spheres, trajectory):

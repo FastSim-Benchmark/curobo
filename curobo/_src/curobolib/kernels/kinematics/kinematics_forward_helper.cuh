@@ -230,12 +230,12 @@ namespace curobo{
           const int matAddrBase
         ) {
           const int env_idx = (num_envs > 1) ? env_query_idx[batch_index / horizon] : 0;
-          const int sphere_config_offset = env_idx * nspheres * 4;
-          const int batchAddrs = batch_index * nspheres * 4;
-          const int16_t spheres_perthread = (nspheres + threads_per_batch - 1) / threads_per_batch;
+          const int64_t sphere_config_offset = static_cast<int64_t>(env_idx) * nspheres * 4;
+          const int64_t batchAddrs = static_cast<int64_t>(batch_index) * nspheres * 4;
+          const int spheres_perthread = (nspheres + threads_per_batch - 1) / threads_per_batch;
 
-          for (int16_t i = 0; i < spheres_perthread; i++) {
-            const int16_t sph_idx = i * threads_per_batch + thread_index;
+          for (int i = 0; i < spheres_perthread; i++) {
+            const int sph_idx = i * threads_per_batch + thread_index;
 
             if (sph_idx >= nspheres) {
               break;
@@ -244,7 +244,9 @@ namespace curobo{
             // read cumul idx:
             const int16_t read_cumul_idx = linkSphereMap[sph_idx];
             float4 spheres_mem = make_float4(0.0, 0.0, 0.0, 0.0);
-            const int16_t sphAddrs = sph_idx * 4;
+            // Link IDs fit int16; float offsets do not (8192 spheres already
+            // exceed its positive range). Preserve full tensor addresses.
+            const int64_t sphAddrs = static_cast<int64_t>(sph_idx) * 4;
 
             transform_sphere_float4(&cumul_mat[matAddrBase + read_cumul_idx * 12],
                                    &robot_spheres[sphere_config_offset + sphAddrs], spheres_mem);

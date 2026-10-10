@@ -54,11 +54,13 @@ class TestSphereFitType:
         assert SphereFitType.SURFACE.value == "surface"
         assert SphereFitType.VOXEL.value == "voxel"
         assert SphereFitType.MORPHIT.value == "morphit"
+        assert SphereFitType.BOUNDED.value == "bounded"
+        assert SphereFitType.RIM.value == "rim"
 
     def test_sphere_fit_type_count(self):
         """Test that we have the expected number of fit types."""
         fit_types = list(SphereFitType)
-        assert len(fit_types) == 4
+        assert len(fit_types) == 6
 
 
 class TestSampleEvenFitMesh:

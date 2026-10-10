@@ -1218,3 +1218,15 @@ def compute_local_sdf_with_grad(
         grad_local = wp.vec3(0.0, 0.0, 0.0)
 
     return wp.vec4(sdf, grad_local[0], grad_local[1], grad_local[2])
+
+
+def query_aabb_overlaps(
+    obs_set: VoxelDataWarp,
+    env_idx: wp.int32,
+    local_idx: wp.int32,
+    query_lower: wp.vec3,
+    query_upper: wp.vec3,
+    radius: wp.float32,
+) -> bool:
+    """Retain the existing analytic/voxel query without mesh broad-phase pruning."""
+    return True

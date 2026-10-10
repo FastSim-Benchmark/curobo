@@ -13,6 +13,25 @@ from curobo._src.geom.sphere_fit.types import SphereFitMetrics, SphereFitResult
 from curobo._src.geom.sphere_fit.wp_mesh_query import WarpMeshQuery
 
 
+def _solid_components(mesh):
+    """Interpret closed collision components as a union, without repairing them."""
+    parts = list(mesh.split(only_watertight=False, repair=False))
+    if len(parts) > 1 and all(
+        part.is_watertight and part.is_winding_consistent and part.volume > 0 for part in parts
+    ):
+        return parts
+    return [mesh]
+
+
+def _union_sdf(queries, points):
+    """Outside distance is distance to the nearest solid, not an internal face."""
+    distance = None
+    for query in queries:
+        current, _ = query.query_sdf(points.contiguous())
+        distance = current.clone() if distance is None else torch.minimum(distance, current)
+    return distance
+
+
 def compute_sphere_fit_metrics(
     mesh: trimesh.Trimesh,
     centers: np.ndarray,
@@ -50,14 +69,23 @@ def compute_sphere_fit_metrics(
     centers_t = torch.as_tensor(centers, dtype=torch.float32, device=dev)
     radii_t = torch.as_tensor(radii, dtype=torch.float32, device=dev).ravel()
 
-    mesh_query = WarpMeshQuery(mesh, dev)
+    components = _solid_components(mesh)
+    mesh_queries = [WarpMeshQuery(part, dev) for part in components]
 
     # --- Coverage: fraction of interior points inside >= 1 sphere -----------
-    interior_pts = trimesh.sample.volume_mesh(mesh, count=n_interior * 2)
-    interior_pts = interior_pts[:n_interior]
+    candidates = np.random.random((n_interior * 2, 3)) * mesh.extents + mesh.bounds[0]
+    contained = np.logical_or.reduce([part.contains(candidates) for part in components])
+    interior_pts = candidates[contained][:n_interior]
+    if not len(interior_pts):
+        raise ValueError("sphere-fit coverage sampling found no interior points")
     interior_t = torch.as_tensor(interior_pts, dtype=torch.float32, device=dev)
 
-    dists = torch.cdist(interior_t.unsqueeze(0), centers_t.unsqueeze(0)).squeeze(0)
+    # Matrix-product distances can lose millimeter-scale separation when TF32
+    # is enabled elsewhere. Direct differences preserve the coverage witness.
+    dists = torch.cdist(
+        interior_t.unsqueeze(0), centers_t.unsqueeze(0),
+        compute_mode="donot_use_mm_for_euclid_dist",
+    ).squeeze(0)
     covered = (dists < radii_t.unsqueeze(0)).any(dim=1)
     coverage = covered.float().mean().item()
 
@@ -77,13 +105,12 @@ def compute_sphere_fit_metrics(
         )
         sphere_surface_pts.append(pts)
     sphere_surf_t = torch.cat(sphere_surface_pts, dim=0)
-    outside_mask = mesh_query.query_outside_mask(sphere_surf_t.contiguous())
+    signed_distance = _union_sdf(mesh_queries, sphere_surf_t)
+    outside_mask = signed_distance > 0
     protrusion = outside_mask.float().mean().item()
 
     if outside_mask.any():
-        outside_pts = sphere_surf_t[outside_mask]
-        sdf_outside, _ = mesh_query.query_sdf(outside_pts.contiguous())
-        protrusion_dists = torch.abs(sdf_outside)
+        protrusion_dists = signed_distance[outside_mask]
         protrusion_dist_mean = protrusion_dists.mean().item()
         protrusion_dist_p95 = torch.quantile(protrusion_dists, 0.95).item()
     else:
@@ -93,7 +120,10 @@ def compute_sphere_fit_metrics(
     # --- Surface gap: distance from mesh surface to nearest sphere surface --
     surface_pts, _ = trimesh.sample.sample_surface(mesh, n_surface)
     surface_t = torch.as_tensor(surface_pts, dtype=torch.float32, device=dev)
-    surf_dists = torch.cdist(surface_t.unsqueeze(0), centers_t.unsqueeze(0)).squeeze(0)
+    surf_dists = torch.cdist(
+        surface_t.unsqueeze(0), centers_t.unsqueeze(0),
+        compute_mode="donot_use_mm_for_euclid_dist",
+    ).squeeze(0)
     sphere_surf_dist = surf_dists - radii_t.unsqueeze(0)
     min_gap, _ = sphere_surf_dist.min(dim=1)
     gap_values = torch.relu(min_gap)

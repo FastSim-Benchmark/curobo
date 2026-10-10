@@ -10,7 +10,7 @@ the struct type at runtime.
 
 Key features:
 - Single kernel for all obstacle types (cuboid, mesh, voxel)
-- 2D parallelization: threads = num_spheres × max_n_obstacles
+- 2D parallelization: bounded obstacle lanes per sphere, dynamic populated-slot traversal
 - Sparse atomic accumulation: only non-zero costs write to output
 - Optimized frame transforms: load once per (sphere, obstacle) pair
 
@@ -45,21 +45,24 @@ from curobo._src.geom.data.registry import OBSTACLE_SDF_MODULES
 
 # Initialize to None - will be set by first iteration
 is_obs_enabled = None
+query_aabb_overlaps = None
 load_obstacle_transform = None
 compute_local_sdf_with_grad = None
 
 for _module_path in OBSTACLE_SDF_MODULES:
     _data_module = import_module(_module_path)
     _obs_fn = getattr(_data_module, "is_obs_enabled")
+    _bounds_fn = getattr(_data_module, "query_aabb_overlaps")
     _transform_fn = getattr(_data_module, "load_obstacle_transform")
     _sdf_fn = getattr(_data_module, "compute_local_sdf_with_grad")
 
     # Register with wp.func - adds overloads on subsequent iterations
     is_obs_enabled = wp.func(_obs_fn, module=__name__)
+    query_aabb_overlaps = wp.func(_bounds_fn, module=__name__)
     load_obstacle_transform = wp.func(_transform_fn, module=__name__)
     compute_local_sdf_with_grad = wp.func(_sdf_fn, module=__name__)
 
-del _module_path, _data_module, _obs_fn, _transform_fn, _sdf_fn
+del _module_path, _data_module, _obs_fn, _bounds_fn, _transform_fn, _sdf_fn
 
 
 # =============================================================================
@@ -67,8 +70,8 @@ del _module_path, _data_module, _obs_fn, _transform_fn, _sdf_fn
 # =============================================================================
 
 
-@wp.kernel
-def sphere_obstacle_collision_kernel(
+@wp.func
+def sphere_obstacle_collision_kernel_pair(
     # Obstacle set (generic - uses Warp function overloading)
     obs_set: Any,
     # Sphere data
@@ -88,6 +91,8 @@ def sphere_obstacle_collision_kernel(
     use_multi_env: wp.uint8,
     replacement_cuboid_ids: wp.array(dtype=wp.int32),
     replacement_pair_count: wp.int32,
+    sph_flat_idx: wp.int32,
+    obs_local_idx: wp.int32,
 ):
     """Compute sphere-obstacle collision with 2D parallelization.
 
@@ -95,7 +100,7 @@ def sphere_obstacle_collision_kernel(
     Warp function overloading. The correct `compute_sdf_with_grad` and
     `is_obs_enabled` functions are selected based on the struct type of `obs_set`.
 
-    Thread layout: tid = sph_flat_idx * max_n_obs + obs_local_idx
+    Thread layout: (sphere, obstacle), without a signed 32-bit pair index.
 
     Args:
         obs_set: Obstacle set (CuboidDataWarp, MeshDataWarp, or VoxelDataWarp).
@@ -108,16 +113,15 @@ def sphere_obstacle_collision_kernel(
         batch_size: Number of batch elements.
         horizon: Trajectory horizon.
         num_spheres: Number of spheres per timestep.
-        max_n_obs: Maximum obstacles per environment.
+        max_n_obs: Number of parallel obstacle lanes per sphere.
         use_multi_env: Whether to use batch-specific environments.
         replacement_cuboid_ids: Flattened (num_envs, num_spheres, replacement_pair_count) map.
         replacement_pair_count: Number of replacement slots per sphere for this obstacle set.
+        sph_flat_idx: Flattened batch, timestep and sphere coordinate.
+        obs_local_idx: Original obstacle slot in the selected environment.
     """
-    tid = wp.tid()
-
-    # 2D decode: (sphere, obstacle)
-    sph_flat_idx = tid / max_n_obs
-    obs_local_idx = tid - sph_flat_idx * max_n_obs
+    # The pair count can exceed int32 even when each coordinate fits. A linear
+    # wp.tid() truncates that count before the sphere/obstacle decode.
 
     total_spheres = batch_size * horizon * num_spheres
     if sph_flat_idx >= total_spheres:
@@ -156,6 +160,11 @@ def sphere_obstacle_collision_kernel(
     # Transform sphere center to local frame
     local_pt = wp.transform_point(inv_t, query.center)
 
+    if not query_aabb_overlaps(
+        obs_set, env_idx, obs_local_idx, local_pt, local_pt, radius_adjusted
+    ):
+        return
+
     # Compute local SDF and gradient
     local_result = compute_local_sdf_with_grad(
         obs_set, env_idx, obs_local_idx, local_pt, radius_adjusted
@@ -174,4 +183,45 @@ def sphere_obstacle_collision_kernel(
             w * activation_result[1] * grad_world,
             distance,
             gradient,
+        )
+
+
+@wp.kernel
+def sphere_obstacle_collision_kernel(
+    # Obstacle set (generic - uses Warp function overloading)
+    obs_set: Any,
+    # Sphere data
+    spheres: wp.array(dtype=wp.vec4),  # [batch * horizon * num_spheres]
+    # Parameters
+    weight: wp.array(dtype=wp.float32),
+    activation_distance: wp.array(dtype=wp.float32),
+    env_query_idx: wp.array(dtype=wp.int32),
+    # Outputs (pre-zeroed)
+    distance: wp.array(dtype=wp.float32),  # [batch * horizon * num_spheres]
+    gradient: wp.array(dtype=wp.float32),  # [batch * horizon * num_spheres * 4]
+    # Dimensions
+    batch_size: wp.int32,
+    horizon: wp.int32,
+    num_spheres: wp.int32,
+    max_n_obs: wp.int32,
+    use_multi_env: wp.uint8,
+    replacement_cuboid_ids: wp.array(dtype=wp.int32),
+    replacement_pair_count: wp.int32,
+):
+    """Visit populated slots with a bounded lane count, including during graph replay."""
+    sph_flat_idx, lane = wp.tid()
+    if sph_flat_idx >= batch_size * horizon * num_spheres:
+        return
+    if spheres[sph_flat_idx][3] < 0.0:
+        return
+    b_idx = sph_flat_idx / (horizon * num_spheres)
+    env_idx = wp.int32(0)
+    if use_multi_env == wp.uint8(1):
+        env_idx = env_query_idx[b_idx]
+    for obs_local_idx in range(lane, wp.min(obs_set.n_per_env[env_idx], obs_set.max_n), max_n_obs):
+        sphere_obstacle_collision_kernel_pair(
+            obs_set, spheres, weight, activation_distance, env_query_idx,
+            distance, gradient, batch_size, horizon, num_spheres, max_n_obs,
+            use_multi_env, replacement_cuboid_ids, replacement_pair_count,
+            sph_flat_idx, obs_local_idx,
         )

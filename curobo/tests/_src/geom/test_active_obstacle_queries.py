@@ -76,7 +76,7 @@ def _dense(scene, q, env, weight, eta, dt, pairs, swept, speed=False):
         )
         wp.launch(
             kernel,
-            dim=b * h * n * data.max_n,
+            dim=(b * h * n, data.max_n),
             inputs=[
                 data.to_warp(),
                 spheres,
@@ -197,3 +197,81 @@ def test_small_and_non_multiple_capacities(capacity):
     args = _inputs(cfg)
     expected, _ = _dense(scene, *args, False)
     torch.testing.assert_close(_query(scene, *args, False), expected, rtol=0, atol=0)
+
+
+def _grouped_inputs(cfg, count):
+    generator = torch.Generator(device="cuda:0").manual_seed(17)
+    q = torch.rand((2, 5, count, 4), generator=generator, device="cuda:0") * 0.04
+    q[..., 0] += 0.09
+    q[..., 3] = 0.025
+    q[:, 0, ::3, 0] -= 0.7
+    q[:, 2, ::3, 0] += 0.7
+    q[:, :, 32:64, :3] += 3.0
+    q[0, 2, 5, :3] = 0.0  # Deep solid query must survive broad-phase pruning.
+    q[..., -1, 3] = -1.0
+    q.requires_grad_(True)
+    env = torch.tensor([1, 0], device="cuda:0", dtype=torch.int32)
+    weight, eta, dt = [cfg.to_device([v]) for v in (2.0, 0.02, 0.05)]
+    pairs = torch.full((2, count, 2), -1, device="cuda:0", dtype=torch.int32)
+    return q, env, weight, eta, dt, pairs
+
+
+@pytest.mark.parametrize("count,speed", [(32, False), (33, True), (65, False), (65, True)])
+def test_grouped_sweeps_preserve_rotated_tail_replacement_and_crossing_queries(count, speed):
+    scene, data, cfg = _scene("mesh", capacity=257)
+    args = _grouped_inputs(cfg, count)
+    q, env, weight, eta, dt, pairs = args
+    data.inv_pose[1, :, 3] = 0.9238795325
+    data.inv_pose[1, :, 6] = 0.3826834324
+    pairs[:, :5, 0] = 256
+    pairs[:, :2, 1] = 0
+    for slots in ([], [256], [0, 127, 128, 256], list(range(257)), []):
+        data.enable.zero_()
+        data.enable[0, slots] = 1
+        data.enable[1, slots[::2]] = 1
+        expected, gradient = _dense(scene, *args, True, speed)
+        result = _query(scene, *args, True, speed)
+        scale = torch.linspace(0.2, 1.5, result.numel(), device=q.device).reshape_as(result)
+        actual_gradient = torch.autograd.grad(result, q, grad_outputs=scale)[0]
+        torch.testing.assert_close(result, expected, rtol=3e-5, atol=2e-6)
+        torch.testing.assert_close(
+            actual_gradient, gradient * scale.unsqueeze(-1), rtol=3e-5, atol=2e-6
+        )
+        assert not result[..., -1].any()
+        if slots:
+            assert result.max() > 0
+        else:
+            assert not result.any()
+
+
+def test_grouped_sweep_graph_recomputes_bounds_after_query_and_world_changes():
+    scene, data, cfg = _scene("mesh", capacity=257)
+    args = _grouped_inputs(cfg, 65)
+    q, env, weight, eta, dt, pairs = args
+    buffer = CollisionBuffer.from_shape(q.shape, cfg)
+    checker = CollisionChecker(cfg)
+    initial = q.detach().clone()
+    with torch.no_grad():
+        q[..., :3] += 10.0  # Capture far away; later queries must refresh bounds.
+    for _ in range(3):
+        _query(scene, *args, True, buffer=buffer, checker=checker)
+        _dense(scene, *args, True)
+    graph = torch.cuda.CUDAGraph()
+    torch.cuda.synchronize()
+    with torch.cuda.graph(graph):
+        result = _query(scene, *args, True, buffer=buffer, checker=checker)
+    for offset, obstacle_offset, count in (
+        (0.0, 0.0, 257), (10.0, 0.0, 257), (10.0, 10.0, 257),
+        (0.0, 0.0, 0), (0.0, 0.0, 257),
+    ):
+        with torch.no_grad():
+            q.copy_(initial)
+            q[..., :3] += offset
+        data.inv_pose[..., :3] = -obstacle_offset
+        data.count[:] = count
+        data.enable[:, 256] = 1
+        pairs[:, :5, 0] = 256
+        expected, gradient = _dense(scene, *args, True)
+        graph.replay()
+        torch.testing.assert_close(result, expected, rtol=3e-5, atol=2e-6)
+        torch.testing.assert_close(buffer.gradient, gradient, rtol=3e-5, atol=2e-6)

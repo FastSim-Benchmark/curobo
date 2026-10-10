@@ -25,6 +25,11 @@ import warp as wp
 from curobo._src.geom.collision.wp_collision_kernel import sphere_obstacle_collision_kernel
 from curobo._src.geom.collision.wp_speed_metric import apply_speed_metric
 from curobo._src.geom.collision.wp_sweep_collision_kernel import (
+    SWEEP_GROUP_SIZE,
+    collect_swept_group_candidates,
+    grouped_swept_sphere_obstacle_collision_kernel,
+    obstacle_world_bounds,
+    swept_sphere_group_bounds,
     swept_sphere_obstacle_collision_kernel,
 )
 from curobo._src.util.warp import get_warp_device_stream
@@ -97,11 +102,11 @@ class SphereObstacleCollision(torch.autograd.Function):
             pairs = replacement_mesh_ids if data is scene.meshes else replacement_cuboid_ids
             enabled_pairs = data is scene.meshes or data is scene.cuboids
             replacement_wp = wp.from_torch(pairs.view(-1))
-            max_n = data.max_n
+            max_n = min(data.max_n, 128)
             data_wp = data.to_warp()
             wp.launch(
                 kernel=sphere_obstacle_collision_kernel,
-                dim=b * h * n * max_n,
+                dim=(b * h * n, max_n),
                 inputs=[
                     data_wp, spheres_wp, weight_wp, eta_wp, env_idx_wp,
                     out_cost_wp, out_grad_wp, b, h, n, max_n, use_multi_env_wp,
@@ -215,11 +220,66 @@ class SweptSphereObstacleCollision(torch.autograd.Function):
             pairs = replacement_mesh_ids if data is scene.meshes else replacement_cuboid_ids
             enabled_pairs = data is scene.meshes or data is scene.cuboids
             replacement_wp = wp.from_torch(pairs.view(-1))
-            max_n = data.max_n
+            max_n = min(data.max_n, 128)
             data_wp = data.to_warp()
+            kernel = swept_sphere_obstacle_collision_kernel
+            dimension = (b * h * n, max_n)
+            group_inputs = []
+            if (data is scene.meshes or data is scene.cuboids) and n >= SWEEP_GROUP_SIZE:
+                groups_per_step = (n + SWEEP_GROUP_SIZE - 1) // SWEEP_GROUP_SIZE
+                group_count = b * h * groups_per_step
+                # Fresh scratch is written on the query stream before use. The
+                # CUDA Graph allocator retains its captured storage on replay.
+                bounds = torch.empty(
+                    (2, group_count, 4), device=query_spheres.device, dtype=torch.float32
+                )
+                lower_wp = wp.from_torch(bounds[0], dtype=wp.vec4)
+                upper_wp = wp.from_torch(bounds[1], dtype=wp.vec4)
+                wp.launch(
+                    swept_sphere_group_bounds,
+                    dim=group_count,
+                    inputs=[spheres_wp, eta_wp, lower_wp, upper_wp, h, n, groups_per_step],
+                    stream=stream,
+                    device=device,
+                )
+                kernel = grouped_swept_sphere_obstacle_collision_kernel
+                dimension = (group_count, SWEEP_GROUP_SIZE)
+                if data is scene.meshes:
+                    local_bounds = data.aabb.reshape(-1, 6)
+                else:
+                    half = data.dims[..., :3] * 0.5
+                    local_bounds = torch.cat((-half, half), dim=-1).reshape(-1, 6)
+                obstacle_bounds = torch.empty(
+                    (2, data.num_envs * data.max_n, 4),
+                    device=query_spheres.device, dtype=torch.float32,
+                )
+                obstacle_lower = wp.from_torch(obstacle_bounds[0], dtype=wp.vec4)
+                obstacle_upper = wp.from_torch(obstacle_bounds[1], dtype=wp.vec4)
+                wp.launch(
+                    obstacle_world_bounds, dim=data.num_envs * data.max_n,
+                    inputs=[data_wp, wp.from_torch(local_bounds), obstacle_lower, obstacle_upper],
+                    stream=stream, device=device,
+                )
+                # Bounded scratch; overflow retains all obstacle checks below.
+                candidate_counts = torch.zeros(
+                    group_count, device=query_spheres.device, dtype=torch.int32
+                )
+                candidates = torch.empty(
+                    (group_count, 16), device=query_spheres.device, dtype=torch.int32
+                )
+                counts_wp = wp.from_torch(candidate_counts)
+                candidates_wp = wp.from_torch(candidates)
+                wp.launch(
+                    collect_swept_group_candidates, dim=(group_count, max_n),
+                    inputs=[data_wp, env_idx_wp, b, h, max_n, use_multi_env_wp,
+                            lower_wp, upper_wp, groups_per_step,
+                            obstacle_lower, obstacle_upper, counts_wp, candidates_wp],
+                    stream=stream, device=device, block_dim=128,
+                )
+                group_inputs = [groups_per_step, counts_wp, candidates_wp]
             wp.launch(
-                kernel=swept_sphere_obstacle_collision_kernel,
-                dim=b * h * n * max_n,
+                kernel=kernel,
+                dim=dimension,
                 inputs=[
                     data_wp,
                     spheres_wp,
@@ -241,7 +301,7 @@ class SweptSphereObstacleCollision(torch.autograd.Function):
                         )
                         if enabled_pairs and pairs.numel() > 0 else 0
                     ),
-                ],
+                ] + group_inputs,
                 stream=stream,
                 device=device,
                 block_dim=128,

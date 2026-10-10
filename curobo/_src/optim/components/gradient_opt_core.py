@@ -29,6 +29,7 @@ from curobo._src.util.cuda_event_timer import CudaEventTimer
 from curobo._src.util.cuda_graph_util import GraphExecutor, create_graph_executor
 from curobo._src.util.logging import log_and_raise, log_info
 from curobo._src.util.tensor_util import check_nan_last_dimension
+from curobo._src.util.time_budget import check_time_budget
 
 
 class GradientOptCore:
@@ -303,8 +304,17 @@ class GradientOptCore:
 
         self._record_iteration_state(iteration_state)
 
-        for _ in range(self.outer_iters):
+        def finish_pending():
+            if q.is_cuda:
+                torch.cuda.current_stream(q.device).synchronize()
+
+        shape_context = f"gradient optimizer shape={tuple(q.shape)}"
+        check_time_budget(finish_pending, context=shape_context + ", initialization")
+        for iteration in range(self.outer_iters):
+            context = f"{shape_context}, outer iteration={iteration + 1}/{self.outer_iters}"
+            check_time_budget(context=context)
             iteration_state = self._dispatch("_opt_iters", iteration_state)
+            check_time_budget(finish_pending, context=context)
 
             if not self.config.fixed_iters:
                 if BestTracker.check_convergence(

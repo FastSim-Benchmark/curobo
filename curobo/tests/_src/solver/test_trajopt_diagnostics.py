@@ -132,6 +132,7 @@ def test_solver_result_adds_diagnostics_only_for_failure(success, caplog):
     assert "selected_joint_bounds" not in original_debug
     if success:
         assert "selected_joint_bounds" not in returned.debug_info
+        assert "Rejected trajectory selected constraint maxima" not in caplog.text
         assert "Rejected trajectory raw joint-bound terms" not in caplog.text
     else:
         detail = returned.debug_info["selected_joint_bounds"]
@@ -140,3 +141,5 @@ def test_solver_result_adds_diagnostics_only_for_failure(success, caplog):
         assert detail["terms"]["position"]["end_maximum_excess"] == 1.25
         assert "Rejected trajectory raw joint-bound terms" in caplog.text
         assert str(detail["terms"]) in caplog.text
+        assert "Rejected trajectory selected constraint maxima" in caplog.text
+        assert str(original_debug["selected_constraint_maxima"]) in caplog.text

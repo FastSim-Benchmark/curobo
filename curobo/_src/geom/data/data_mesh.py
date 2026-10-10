@@ -92,6 +92,7 @@ class MeshData:
     Tensor layouts:
         - mesh_ids: (num_envs, max_n) - int64 Warp mesh handles
         - dims: (num_envs, max_n, 4) - bounding box dimensions [x, y, z, pad]
+        - aabb: (num_envs, max_n, 6) - local lower and upper mesh bounds
         - inv_pose: (num_envs, max_n, 8) - inverse pose [x, y, z, qw, qx, qy, qz, pad]
         - enable: (num_envs, max_n) - uint8 flags
         - use_signed_distance: (num_envs, max_n) - uint8 distance semantics
@@ -103,6 +104,9 @@ class MeshData:
 
     #: Mesh bounding box dimensions [x, y, z, pad] in local frame.
     dims: torch.Tensor
+
+    #: Local mesh bounds [lower_x, lower_y, lower_z, upper_x, upper_y, upper_z].
+    aabb: torch.Tensor
 
     #: Inverse pose [x, y, z, qw, qx, qy, qz] with padding.
     inv_pose: torch.Tensor
@@ -193,6 +197,9 @@ class MeshData:
         return cls(
             mesh_ids=mesh_ids,
             dims=dims,
+            aabb=torch.zeros(
+                (num_envs, max_n, 6), device=device_cfg.device, dtype=device_cfg.dtype
+            ),
             inv_pose=inv_pose,
             enable=enable,
             use_signed_distance=use_signed_distance,
@@ -361,6 +368,8 @@ class MeshData:
             # Compute bounding box dimensions from mesh bounds
             lower, upper = mesh_data.get_bounds()
             dims_list[i] = upper - lower
+            self.aabb[env_idx, i, :3] = lower
+            self.aabb[env_idx, i, 3:] = upper
 
         pose_buffer = Pose.from_batch_list(pose_list, self.device_cfg)
         inv_pose_buffer = pose_buffer.inverse()
@@ -402,6 +411,8 @@ class MeshData:
 
         self.mesh_ids[env_idx, current_count] = mesh_data.mesh_id
         self.dims[env_idx, current_count, :3] = mesh_dims
+        self.aabb[env_idx, current_count, :3] = lower
+        self.aabb[env_idx, current_count, 3:] = upper
         self.inv_pose[env_idx, current_count, :7] = obj_w_pose.get_pose_vector()
         self.enable[env_idx, current_count] = 1
         self.use_signed_distance[env_idx, current_count] = int(
@@ -417,7 +428,8 @@ class MeshData:
         idx = self.get_idx(name, env_idx)
         last = int(self.count[env_idx].item()) - 1
         for buffer in (
-            self.mesh_ids, self.dims, self.inv_pose, self.enable, self.use_signed_distance
+            self.mesh_ids, self.dims, self.aabb, self.inv_pose,
+            self.enable, self.use_signed_distance,
         ):
             if idx != last:
                 buffer[env_idx, idx].copy_(buffer[env_idx, last])
@@ -441,6 +453,8 @@ class MeshData:
         self.wp_cache[mesh.name] = data
         self.mesh_ids[env_idx, idx] = data.mesh_id
         self.dims[env_idx, idx, :3] = upper - lower
+        self.aabb[env_idx, idx, :3] = lower
+        self.aabb[env_idx, idx, 3:] = upper
         self.inv_pose[env_idx, idx, :7] = inverse.get_pose_vector()
         self.use_signed_distance[env_idx, idx] = signed
         self.enable[env_idx, idx] = 1
@@ -595,6 +609,7 @@ class MeshData:
         s = MeshDataWarp()
         s.mesh_ids = wp.from_torch(self.mesh_ids.view(-1), dtype=wp.uint64)
         s.dims = wp.from_torch(self.dims.view(-1, 4), dtype=wp.float32)
+        s.aabb = wp.from_torch(self.aabb.view(-1, 6), dtype=wp.float32)
         s.inv_pose = wp.from_torch(self.inv_pose.view(-1, 8), dtype=wp.float32)
         s.enable = wp.from_torch(self.enable.view(-1), dtype=wp.uint8)
         s.use_signed_distance = wp.from_torch(
@@ -619,6 +634,7 @@ class MeshDataWarp:
     Attributes:
         mesh_ids: Warp mesh handles for BVH queries. Shape: (num_envs * max_n,).
         dims: Bounding box dimensions [x, y, z, pad]. Shape: (num_envs * max_n, 4).
+        aabb: Local lower and upper mesh bounds. Shape: (num_envs * max_n, 6).
         inv_pose: Inverse pose [x, y, z, qw, qx, qy, qz, pad]. Shape: (num_envs * max_n, 8).
         enable: Enable flag per mesh. 1 = active, 0 = disabled.
         use_signed_distance: Distance mode per mesh. 1 = signed solid, 0 =
@@ -631,6 +647,7 @@ class MeshDataWarp:
 
     mesh_ids: wp.array(dtype=wp.uint64)
     dims: wp.array2d(dtype=wp.float32)
+    aabb: wp.array2d(dtype=wp.float32)
     inv_pose: wp.array2d(dtype=wp.float32)
     enable: wp.array(dtype=wp.uint8)
     use_signed_distance: wp.array(dtype=wp.uint8)
@@ -948,3 +965,48 @@ def compute_local_sdf_with_grad(
         grad_local = sign * delta / dis_length
 
     return wp.vec4(signed_dist, grad_local[0], grad_local[1], grad_local[2])
+
+
+def query_aabb_overlaps(
+    obs_set: MeshDataWarp,
+    env_idx: wp.int32,
+    local_idx: wp.int32,
+    query_lower: wp.vec3,
+    query_upper: wp.vec3,
+    radius: wp.float32,
+) -> bool:
+    """Retain solid interiors and surface triangles intersecting the swept bounds."""
+    idx = get_obs_idx(env_idx, local_idx, obs_set.max_n)
+    overlaps = True
+    finite = wp.isfinite(radius)
+    expanded_lower = query_lower
+    expanded_upper = query_upper
+    for axis in range(3):
+        lower = obs_set.aabb[idx, axis]
+        upper = obs_set.aabb[idx, axis + 3]
+        # Retain the boundary and a float32 transform/interval-rounding guard.
+        scale = wp.max(1.0, wp.max(wp.abs(lower), wp.abs(upper)))
+        scale = wp.max(scale, wp.max(wp.abs(query_lower[axis]), wp.abs(query_upper[axis])))
+        guard = 3.814697265625e-6 * wp.max(scale, wp.abs(radius))
+        if query_upper[axis] + radius + guard < lower:
+            overlaps = False
+        if query_lower[axis] - radius - guard > upper:
+            overlaps = False
+        expanded_lower[axis] = query_lower[axis] - radius - guard
+        expanded_upper[axis] = query_upper[axis] + radius + guard
+        if (
+            not wp.isfinite(lower) or not wp.isfinite(upper)
+            or not wp.isfinite(expanded_lower[axis])
+            or not wp.isfinite(expanded_upper[axis])
+        ):
+            finite = False
+    if not overlaps:
+        return False
+    # A solid can contain the whole query without a nearby boundary. Surface
+    # meshes have no occupied interior, so an empty triangle-AABB query safely
+    # excludes them even when their overall bounds span an entire room.
+    if obs_set.use_signed_distance[idx] == wp.uint8(1) or not finite:
+        return True
+    triangles = wp.mesh_query_aabb(obs_set.mesh_ids[idx], expanded_lower, expanded_upper)
+    triangle = wp.int32(0)
+    return wp.mesh_query_aabb_next(triangles, triangle)

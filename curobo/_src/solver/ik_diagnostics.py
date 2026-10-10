@@ -11,6 +11,53 @@ from curobo._src.solver.trajopt_diagnostics import joint_bound_diagnostics
 from curobo._src.state.state_joint import JointState
 
 
+def _bounded_pair_overlaps(sample, pairs, padding, chunk_size=262144):
+    """Count all positive pairs and retain the exact stable top eight.
+
+    Keep the source pair table's integer width until each chunk is indexed.
+    Filter inactive radii before materializing distance vectors, and clone
+    retained scalars so the bounded result cannot retain a whole chunk.
+    """
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    radii = sample[:, 3] + padding
+    total = 0
+    best = []
+    for start in range(0, len(pairs), chunk_size):
+        chunk = pairs[start : start + chunk_size].long()
+        first, second = chunk.T
+        valid = torch.nonzero((radii[first] >= 0) & (radii[second] >= 0)).flatten()
+        if not len(valid):
+            continue
+        first, second = first[valid], second[valid]
+        distance = ((sample[first, :3] - sample[second, :3]) ** 2).sum(dim=-1)
+        radius_sum = radii[first] + radii[second]
+        overlap = radius_sum**2 - distance
+        positive = torch.nonzero(overlap > 0).flatten()
+        total += len(positive)
+        order = torch.argsort(overlap[positive], descending=True, stable=True)
+        for local in positive[order[:8]].tolist():
+            best.append(
+                (
+                    int(valid[local]) + start,
+                    distance[local].clone(),
+                    radius_sum[local].clone(),
+                    overlap[local].clone(),
+                )
+            )
+        best.sort(key=lambda row: (-float(row[3]), row[0]))
+        del best[8:]
+    top = [row[0] for row in best]
+    return (
+        total,
+        top,
+        {r[0]: r[1] for r in best},
+        {r[0]: r[2] for r in best},
+        {r[0]: r[3] for r in best},
+    )
+
+
+
 def self_collision_pair_diagnostics(state, selected, seed_count, collision, kinematics):
     """Report bounded enabled pairs from the exact FK state used for IK metrics.
 
@@ -29,7 +76,7 @@ def self_collision_pair_diagnostics(state, selected, seed_count, collision, kine
         raise ValueError("IK endpoint diagnostics require a single FK horizon sample")
     indices = selected.detach().reshape(-1)[:4]
     states = states[indices].to(device="cpu", dtype=torch.float64)
-    pairs = collision.collision_pairs.detach().to(device="cpu", dtype=torch.long)
+    pairs = collision.collision_pairs.detach().to(device="cpu")
     padding = collision.sphere_padding.detach().to(device="cpu", dtype=torch.float64)
     mapping = kinematics.link_sphere_idx_map.detach().cpu().tolist()
     names = {index: name for name, index in kinematics.link_name_to_idx_map.items()}
@@ -51,43 +98,46 @@ def self_collision_pair_diagnostics(state, selected, seed_count, collision, kine
         "joint_names": list(kinematics.joint_names),
         "seeds": [],
     }
-    first, second = pairs.T
     for row, seed_index in enumerate(indices.cpu().tolist()):
         sample = states[row, 0]
         effective_radii = sample[:, 3] + padding
-        # The native kernel checks validity after applying per-sphere padding.
-        valid = (effective_radii[first] >= 0) & (effective_radii[second] >= 0)
-        distance_squared = ((sample[first, :3]-sample[second, :3])**2).sum(dim=-1)
-        radius_sum = effective_radii[first]+effective_radii[second]
-        squared_overlap = radius_sum**2-distance_squared
-        positive = torch.nonzero(valid & (squared_overlap > 0), as_tuple=False).flatten()
-        order = torch.argsort(squared_overlap[positive], descending=True, stable=True)
-        top = positive[order[:8]].tolist()
+        positive_count, top, distance_squared, radius_sum, squared_overlap = (
+            _bounded_pair_overlaps(sample, pairs, padding)
+        )
         details = []
         for pair_index in top:
             sphere_indices = pairs[pair_index].tolist()
-            details.append({
-                "enabled_pair_index": pair_index,
-                "spheres": [{
-                    "native_index": i,
-                    "link": names[mapping[i]],
-                    "center_m": sample[i, :3].tolist(),
-                    "radius_m": float(sample[i, 3]),
-                    "padding_m": float(padding[i]),
-                    "effective_radius_m": float(effective_radii[i]),
-                } for i in sphere_indices],
-                "center_distance_m": float(distance_squared[pair_index].sqrt()),
-                "overlap_m": float(radius_sum[pair_index]-distance_squared[pair_index].sqrt()),
-                "squared_overlap_m2": float(squared_overlap[pair_index]),
-            })
-        result["seeds"].append({
-            "seed_index": seed_index,
-            "joint_positions": positions[row, 0].tolist(),
-            "positive_pair_count": len(positive),
-            "pair_sample_truncated": len(positive) > len(details),
-            "maximum_squared_overlap_m2": float(squared_overlap[top[0]]) if top else 0.0,
-            "pairs": details,
-        })
+            details.append(
+                {
+                    "enabled_pair_index": pair_index,
+                    "spheres": [
+                        {
+                            "native_index": i,
+                            "link": names[mapping[i]],
+                            "center_m": sample[i, :3].tolist(),
+                            "radius_m": float(sample[i, 3]),
+                            "padding_m": float(padding[i]),
+                            "effective_radius_m": float(effective_radii[i]),
+                        }
+                        for i in sphere_indices
+                    ],
+                    "center_distance_m": float(distance_squared[pair_index].sqrt()),
+                    "overlap_m": float(
+                        radius_sum[pair_index] - distance_squared[pair_index].sqrt()
+                    ),
+                    "squared_overlap_m2": float(squared_overlap[pair_index]),
+                }
+            )
+        result["seeds"].append(
+            {
+                "seed_index": seed_index,
+                "joint_positions": positions[row, 0].tolist(),
+                "positive_pair_count": positive_count,
+                "pair_sample_truncated": positive_count > len(details),
+                "maximum_squared_overlap_m2": float(squared_overlap[top[0]]) if top else 0.0,
+                "pairs": details,
+            }
+        )
     return result
 
 

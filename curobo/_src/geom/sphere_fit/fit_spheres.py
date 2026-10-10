@@ -107,6 +107,7 @@ def fit_spheres_to_mesh(
     clip_plane: Optional[tuple] = None,
     device_cfg: DeviceCfg = DeviceCfg(),
     max_bottom_protrusion_m: Optional[float] = None,
+    max_protrusion_m: Optional[float] = None,
 ) -> SphereFitResult:
     """Approximate a mesh with spheres.
 
@@ -114,7 +115,8 @@ def fit_spheres_to_mesh(
         mesh: Input mesh.
         num_spheres: Sphere budget. FAST accepts integers in [1, 256] and may
             return fewer spheres. When None, FAST uses ceil(32*sphere_density),
-            clamped to [1, 256]; legacy methods use their volume-based estimate.
+            clamped to [1, 256]; RIM requires an explicit budget in [4, 50].
+            Legacy methods use their volume-based estimate.
         sphere_density: Dimensionless density multiplier used when *num_spheres*
             is ``None``.  Scales both the sphere count estimate and the
             per-link cap.  ``1.0`` (default) gives a balanced count; ``2.0``
@@ -138,16 +140,37 @@ def fit_spheres_to_mesh(
             (default) disables clipping.
         device_cfg: Device and floating-point dtype for the returned spheres.
         max_bottom_protrusion_m: Optional nonnegative bound below the mesh's
-            minimum local Z. FAST considers this plane during fitting and
-            candidate selection. Final clipping clamps radii, removes spheres
+            minimum local Z. FAST and RIM consider this plane during fitting.
+            RIM retains its source-bound contour witnesses within the source's
+            local-Z extent. Final clipping clamps radii, removes spheres
             entirely below the bound, and preserves it after dtype conversion.
             Metrics describe the final clipped spheres.
             This is an object-local plane, not a world-gravity constraint.
+        max_protrusion_m: Required positive source-relative outward bound for
+            BOUNDED. Other methods reject this parameter. BOUNDED requires an
+            explicit sphere capacity and closed components with a verified
+            interior kernel; unsupported geometry or insufficient capacity
+            raises instead of returning an approximate cover.
 
     Returns:
         A :class:`SphereFitResult` with sphere positions, radii, and
         optionally quality metrics.
     """
+    if fit_type == SphereFitType.RIM:
+        if num_spheres is None:
+            raise ValueError("RIM requires an explicit sphere capacity in [4, 50]")
+        if device_cfg.dtype not in (torch.float32, torch.float64):
+            raise ValueError("RIM supports float32 and float64 output")
+    if fit_type == SphereFitType.BOUNDED:
+        if num_spheres is None:
+            raise ValueError("BOUNDED requires an explicit sphere capacity")
+        if device_cfg.dtype not in (torch.float32, torch.float64):
+            raise ValueError("BOUNDED supports float32 and float64 output")
+        if (isinstance(max_protrusion_m, bool) or max_protrusion_m is None
+                or not numpy.isfinite(max_protrusion_m) or max_protrusion_m <= 1e-5):
+            raise ValueError("BOUNDED max_protrusion_m must be finite and greater than 1e-5")
+    elif max_protrusion_m is not None:
+        raise ValueError("max_protrusion_m requires BOUNDED fitting")
     bottom_plane = None
     if max_bottom_protrusion_m is not None:
         if (isinstance(max_bottom_protrusion_m, bool)
@@ -180,6 +203,8 @@ def fit_spheres_to_mesh(
     history = []
     fallback_used = False
     fast_diagnostics = None
+    bounded_diagnostics = None
+    rim_diagnostics = None
 
     t0 = time.time()
 
@@ -197,6 +222,25 @@ def fit_spheres_to_mesh(
             n_pts, n_radius, fast_diagnostics = fast_fit_mesh(
                 mesh, num_spheres, minimum_z=bottom_plane[1]
             )
+
+    elif fit_type == SphereFitType.RIM:
+        from curobo._src.geom.sphere_fit.fit_rim import rim_fit_mesh
+
+        output_dtype = numpy.float32 if device_cfg.dtype == torch.float32 else numpy.float64
+        n_pts, n_radius, rim_diagnostics = rim_fit_mesh(
+            mesh, num_spheres, output_dtype,
+            minimum_z=None if bottom_plane is None else bottom_plane[1],
+        )
+
+    elif fit_type == SphereFitType.BOUNDED:
+        from curobo._src.geom.sphere_fit.fit_bounded import bounded_fit_mesh
+
+        effective_bound = max_protrusion_m
+        if max_bottom_protrusion_m is not None and effective_bound is not None:
+            effective_bound = min(effective_bound, max_bottom_protrusion_m)
+        n_pts, n_radius, bounded_diagnostics = bounded_fit_mesh(
+            mesh, num_spheres, effective_bound,
+        )
 
     elif fit_type == SphereFitType.SURFACE:
         n_pts, n_radius = sample_even_fit_mesh(mesh, num_spheres, surface_radius)
@@ -222,8 +266,12 @@ def fit_spheres_to_mesh(
                 device=device,
             )
 
-    if fit_type == SphereFitType.FAST and (n_pts is None or len(n_pts) < 1):
-        raise ValueError("FAST produced no spheres; legacy fitting fallback is disabled")
+    if fit_type in (SphereFitType.FAST, SphereFitType.BOUNDED, SphereFitType.RIM) and (
+        n_pts is None or len(n_pts) < 1
+    ):
+        raise ValueError(
+            f"{fit_type.name} produced no spheres; legacy fitting fallback is disabled"
+        )
 
     if (n_pts is None or len(n_pts) < 1) and num_spheres > 0:
         log_warn("sphere_fit: primary method failed, falling back to voxel volume")
@@ -244,6 +292,10 @@ def fit_spheres_to_mesh(
     n_radius = numpy.ravel(n_radius)
 
     if requested_n_spheres is not None and len(n_pts) > requested_n_spheres:
+        if fit_type == SphereFitType.BOUNDED:
+            raise ValueError("BOUNDED cannot truncate a volume cover to fit capacity")
+        if fit_type == SphereFitType.RIM:
+            raise ValueError("RIM cannot truncate a contour cover to fit capacity")
         order = numpy.argsort(-n_radius)[:requested_n_spheres]
         n_pts = n_pts[order]
         n_radius = n_radius[order]
@@ -292,6 +344,25 @@ def fit_spheres_to_mesh(
             "max_bottom_protrusion_m": max_bottom_protrusion_m,
             "frame": "mesh_local",
         }
+    if bounded_diagnostics is not None:
+        from curobo._src.geom.sphere_fit.fit_bounded import verify_bounded_result
+
+        verify_bounded_result(
+            mesh, result.centers.detach().cpu().numpy(), result.radii.detach().cpu().numpy(),
+            bounded_diagnostics,
+        )
+        result.debug_info["bounded"] = bounded_diagnostics
+        result.fit_time_s = time.time() - t0
+    if rim_diagnostics is not None:
+        from curobo._src.geom.sphere_fit.fit_rim import verify_rim_result
+
+        verify_rim_result(
+            mesh, result.centers.detach().cpu().numpy(), result.radii.detach().cpu().numpy(),
+            rim_diagnostics,
+        )
+        result.debug_info["rim"] = rim_diagnostics
+        result.fit_time_s = time.time() - t0
+
     if compute_metrics:
         populate_metrics(result, mesh, device=device)
 

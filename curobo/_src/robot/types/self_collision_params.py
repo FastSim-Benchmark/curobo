@@ -78,36 +78,28 @@ class SelfCollisionKinematicsCfg:
             log_and_raise(
                 f"sphere_pair_distances shape {sphere_pair_distances.shape} should be {num_spheres, num_spheres}"
             )
+        if num_spheres > torch.iinfo(torch.int16).max + 1:
+            log_and_raise("self-collision sphere indices must fit in int16")
 
         device = sphere_pair_distances.device
 
         coll_cpu = sphere_pair_distances.cpu()
-        num_spheres = coll_cpu.shape[0]
-        collision_pairs = torch.zeros((num_spheres * num_spheres, 2), dtype=torch.int16)
-        collision_pairs_idx = 0
-        skip_count = 0
-        all_val = 0
-        # count number of self collisions:
-        for i in range(num_spheres):
-            if torch.max(coll_cpu[i]) == -torch.inf:
-                log_debug("skip" + str(i))
-                continue
-            for j in range(i + 1, num_spheres):
-                if coll_cpu[i, j] != -torch.inf:
-                    ix = collision_pairs_idx
-                    collision_pairs[ix, 0] = i
-                    collision_pairs[ix, 1] = j
-                    collision_pairs_idx += 1
-                else:
-                    skip_count += 1
-                all_val += 1
-
+        eligible = coll_cpu != -torch.inf
+        active_rows = eligible.any(dim=1)
+        row_lengths = num_spheres - 1 - torch.arange(num_spheres, device=coll_cpu.device)
+        all_val = int((row_lengths * active_rows).sum())
+        # nonzero preserves the previous row-major (i, j), i < j ordering without
+        # millions of Python scalar tensor reads and writes for detailed models.
         collision_pairs = (
-            collision_pairs[:collision_pairs_idx, :].contiguous().clone().to(device=device)
+            torch.nonzero(torch.triu(eligible, diagonal=1))
+            .to(device=device, dtype=torch.int16)
+            .contiguous()
         )
         num_self_collisions = collision_pairs.shape[0]
+        skip_count = all_val - num_self_collisions
         max_threads_per_block = 512
-        log_debug("Self Collision skipped %: " + str(100 * float(skip_count) / all_val))
+        skipped_percent = 100 * float(skip_count) / all_val if all_val else 0.0
+        log_debug("Self Collision skipped %: " + str(skipped_percent))
         log_debug("Self Collision count: " + str(num_self_collisions))
         log_debug(
             "Self Collision per thread: "

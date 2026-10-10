@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+"""Autograd bindings for native self-collision distance kernels."""
+
 # Third Party
 from typing import Optional
 
@@ -15,6 +17,8 @@ from curobo._src.curobolib.cuda_ops.tensor_checks import (
 
 
 class SelfCollisionDistance(torch.autograd.Function):
+    """Differentiate per-timestep collision costs with respect to robot spheres."""
+
     @staticmethod
     def forward(
         ctx,
@@ -33,6 +37,7 @@ class SelfCollisionDistance(torch.autograd.Function):
         store_pair_distance: bool,
         return_loss: bool,
     ):
+        """Evaluate collision costs and retain the native sphere gradients."""
         # get batch size
         ctx.set_materialize_grads(False)
         device = robot_spheres.device
@@ -93,12 +98,13 @@ class SelfCollisionDistance(torch.autograd.Function):
     @staticmethod
     @torch.autograd.function.once_differentiable
     def backward(ctx, grad_out_distance: Optional[torch.Tensor]):
+        """Apply each batch/timestep cost gradient to its own sphere gradients."""
         sphere_grad = None
         if grad_out_distance is not None:
             if ctx.needs_input_grad[0]:
                 (g_vec, g_dist) = ctx.saved_tensors
                 if ctx.return_loss:
-                    g_vec = g_vec * grad_out_distance
+                    g_vec = g_vec * grad_out_distance.unsqueeze(-1)
                 sphere_grad = g_vec
 
         return (

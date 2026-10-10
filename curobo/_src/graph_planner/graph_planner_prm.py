@@ -33,6 +33,7 @@ from curobo._src.state.state_joint import JointState
 from curobo._src.transition.robot_state_transition import RobotStateTransition
 from curobo._src.util.cuda_event_timer import CudaEventTimer
 from curobo._src.util.logging import log_and_raise, log_warn
+from curobo._src.util.time_budget import check_time_budget
 from curobo._src.util.trajectory import TrajInterpolationType, linear_smooth
 
 
@@ -431,6 +432,7 @@ class PRMGraphPlanner:
         path_finding_iter = 0
         # print("Initial", path_exists, exist_label)
         while not path_exists or finetune_iter < (self.config.min_finetune_iterations):
+            check_time_budget()
             if all(exist_label):
                 no_path_label = exist_label
             else:

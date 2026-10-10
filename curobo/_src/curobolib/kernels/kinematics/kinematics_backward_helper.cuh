@@ -28,7 +28,7 @@ __device__ void compute_sphere_gradients(
     int thread_idx, int threads_per_batch, int matAddrBase)
 {
     const int env_idx = (num_envs > 1) ? env_query_idx[batch / horizon] : 0;
-    const int sphere_config_offset = env_idx * nspheres * 4;
+    const int64_t sphere_config_offset = static_cast<int64_t>(env_idx) * nspheres * 4;
     int read_cumul_idx = -1;
     const int spheres_perthread = (nspheres + threads_per_batch - 1) / threads_per_batch;
 
@@ -40,8 +40,8 @@ __device__ void compute_sphere_gradients(
         {
             break;
         }
-        const int sphAddrs          = sph_idx * 4;
-        const int batchAddrs        = batch * nspheres * 4;
+        const int64_t sphAddrs      = static_cast<int64_t>(sph_idx) * 4;
+        const int64_t batchAddrs    = static_cast<int64_t>(batch) * nspheres * 4;
         float4    loc_grad_sphere_t = *(float4 *)&grad_spheres[batchAddrs + sphAddrs];
 
         // Sparsity-based optimization: Skip zero computation

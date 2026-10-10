@@ -223,9 +223,11 @@ namespace curobo{
            }
          }
 
-         template<bool STORE_PAIR_DISTANCE>
+         template<bool STORE_PAIR_DISTANCE, bool LOAD_SPHERES_FROM_SHARED=true>
          __forceinline__ __device__ CollisionPair compute_max_collision_distance(
-           float4* spheres_shared,
+           const float4* spheres,
+           const float* offsets,
+           uint32_t num_spheres,
            float* pair_distance,
            int16_t* pair_locations,
            uint32_t batch_horizon_idx,
@@ -253,8 +255,13 @@ namespace curobo{
 
                // compute distance
                // Read two spheres from shared memory:
-               float4 sph1 = spheres_shared[sphere_pair_idx[0]];
-               float4 sph2 = spheres_shared[sphere_pair_idx[1]];
+               const uint32_t sphere_start = LOAD_SPHERES_FROM_SHARED ? 0 : batch_horizon_idx * num_spheres;
+               float4 sph1 = spheres[sphere_start + sphere_pair_idx[0]];
+               float4 sph2 = spheres[sphere_start + sphere_pair_idx[1]];
+               if (!LOAD_SPHERES_FROM_SHARED) {
+                 sph1.w += offsets[sphere_pair_idx[0]];
+                 sph2.w += offsets[sphere_pair_idx[1]];
+               }
 
                float valid_mask = (sph1.w >= 0.0f && sph2.w >= 0.0f) ? 1.0f : 0.0f;
                float f_diff = sphere_squared_distance_fused(sph1, sph2) * valid_mask;

@@ -72,6 +72,16 @@ def test_deep_initial_penetration_is_rejected(scene: SceneCollision) -> None:
         ContactSeparation(contact, scene, 1)
 
 
+def test_penetration_error_identifies_worst_global_sphere(scene: SceneCollision) -> None:
+    """Identify the global sphere rather than its position in a selected subset."""
+    contact = StartContact(
+        "table", (5, 2), ((0.0, 0.0, 0.049, 0.05), (0.1, 0.0, 0.04, 0.05))
+    )
+    with pytest.raises(ValueError, match="sphere_index=2") as error:
+        ContactSeparation(contact, scene, 6)
+    assert "sphere_xyzr=(0.1, 0.0, 0.04, 0.05)" in str(error.value)
+
+
 @pytest.mark.parametrize("sweep", [False, True])
 def test_other_pairs_remain_checked(scene: SceneCollision, sweep: bool) -> None:
     """Replacing payload/table contact must preserve ceiling and gripper/table collision."""

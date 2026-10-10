@@ -10,6 +10,7 @@ import torch
 
 from curobo._src.types.tool_pose import GoalToolPose
 from curobo._src.util.logging import log_warn
+from curobo._src.util.time_budget import check_time_budget
 
 if TYPE_CHECKING:
     from curobo._src.motion.motion_planner import MotionPlanner
@@ -68,6 +69,7 @@ def plan_goalset_fallback(
     elapsed = 0.0
     solve_time = 0.0
     for index in range(budget):
+        check_time_budget()
         target = goal_group(goals, index)
         summary["attempted_goal_indices"].append(index)
         ik = planner.ik_solver.solve_pose(

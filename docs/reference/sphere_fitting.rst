@@ -77,7 +77,7 @@ The main function is :func:`curobo.sphere_fit.fit_spheres_to_mesh`:
 Fit Types
 ----------
 
-cuRobo provides four methods via :class:`curobo.sphere_fit.SphereFitType`:
+cuRobo provides six methods via :class:`curobo.sphere_fit.SphereFitType`:
 
 .. list-table::
    :header-rows: 1
@@ -89,6 +89,16 @@ cuRobo provides four methods via :class:`curobo.sphere_fit.SphereFitType`:
      - Fits a budgeted sphere proxy on the CPU. Uses original geometry, a
        finite-view visual hull, and joint center/radius optimization. CoACD
        decomposition is attempted only if the basic fit fails its audit.
+   * - ``BOUNDED``
+     - Requires explicit ``num_spheres`` capacity (1--16384) and
+       ``max_protrusion_m > 1e-5``. Verifies complete component volume coverage
+       and a source-relative outward distance bound after output conversion
+       and clipping. Unsupported geometry and insufficient capacity raise.
+   * - ``RIM``
+     - Requires an explicit budget in 4--50. Covers a plate's complete
+       outer convex projected contour at every height in its observed rim band.
+       Does not certify filled-face or volume coverage; clipping that loses
+       contour or boundary-vertex coverage raises.
    * - ``SURFACE``
      - Samples the mesh surface evenly with fixed-radius spheres. Fast fallback
        for thin or degenerate meshes.
@@ -108,6 +118,74 @@ volume or a no-missed-collision certificate. It limits global support excess
 in 154 sampled directions to 2.5% of the longest PCA extent before clipping.
 This is not a Hausdorff bound.
 
+BOUNDED is an opt-in alternative for close-clearance payload collision. Inputs
+must contain closed, consistently outward-oriented components with verifiable
+interior polyhedral kernels. Components are split without hole repair. A bound
+on each component hull's excess is deducted from the outward budget before
+sphere fitting. For nontrivial excess, the bound is tightened by partitioning
+the hull into source-face cones and constructing feasible witnesses inside
+each source tetrahedron. This avoids extrapolating one shallow local dent
+across the entire component; excessive concavity is still rejected. Tetrahedral containment checks
+cover complete volumes, with a 0.1 micrometre numerical containment margin,
+rather than relying on surface samples. Sphere deletion retains coverage of
+every certified terminal cell. Refinement is bounded by 32 levels and 500000
+cell visits per component per verification pass; exhaustion raises explicitly.
+The output supports float32 and float64. BOUNDED never truncates its sphere set
+or falls back to another algorithm. Clipping that invalidates coverage raises.
+When a bottom-protrusion bound is supplied, the tighter of it and
+``max_protrusion_m`` applies to all directions. Results expose
+``debug_info["bounded"]["full_volume_covered"]`` and
+``verified_max_protrusion_m`` for the final returned geometry. For BOUNDED,
+``fit_time_s`` includes final converted-geometry coverage verification.
+
+This preprocessing can need thousands of spheres and substantial CPU time for
+detailed thin geometry. Reserve sufficient attached-object capacity and measure
+runtime collision cost before deployment. Existing FAST and legacy fits are
+unchanged; only BOUNDED accepts ``max_protrusion_m``.
+
+RIM is an explicit CPU preprocessing strategy for plate outer contours. It uses
+all source collision components together, removes duplicate vertices for PCA,
+and requires two nondegenerate in-plane spans and a nondegenerate height band,
+without a height-to-width cutoff. It builds one two-dimensional outer convex
+contour; internal component seams and interior holes do not become separate rims.
+Concavities and separated pieces may be bridged by this convex approximation.
+The source mesh remains unchanged; the top-level ``used_convex_hull`` flag
+stays false because no three-dimensional source-hull substitution occurs.
+
+Source vertices within 1.5 mm of the projected outer contour define a rim-height
+band in the PCA normal coordinate. Equal arc-length contour sections receive
+one sphere each. A sphere contains its section's upper and lower corners and
+assigned original boundary-vertex witnesses, with a 1 micrometre containment
+reserve before outward radius rounding. Convexity then covers each intervening
+piecewise-linear contour segment throughout that height band. The returned
+float32/float64 spheres are rechecked after shared clipping and conversion;
+lost sections, missing spheres and uncovered witnesses fail explicitly. RIM
+never truncates or changes methods, and does not accept ``max_protrusion_m``.
+With ``max_bottom_protrusion_m``, each contour prism is first intersected with
+the original mesh's local-Z lower extent. PCA height extrusion can otherwise
+introduce fictitious corners below the source bottom. The clipped prism still
+contains every source rim witness; the source mesh is unchanged. Sphere centers
+are then raised as needed to contain their assigned prism corners and boundary
+vertices while obeying the bottom plane, with the same requested sphere count.
+Final clipping and dtype conversion still require positive coverage margins.
+A plane with no positive clearance for a required witness remains infeasible;
+zero bottom protrusion does not permit a strict enclosure of bottom witnesses.
+Arbitrary ``clip_plane`` constraints continue to use the shared final clipping.
+
+``debug_info["rim"]`` uses schema ``curobo-rim-fit/1`` and mesh-local witness
+coordinates. It reports ``section_corners_m`` per sphere,
+``boundary_vertices_m``, positive ``containment_margin_m``, exact final count,
+PCA extents, perimeter, rim heights, and final bottom protrusion. The flags
+``contour_band_source_bottom_clipped`` and ``bottom_constrained_fit`` identify
+the bottom-constrained geometry and fitting path. It also reports
+source-unbacked intervals on the convex contour as
+``convex_contour_source_gap_length_m`` and
+``maximum_convex_contour_bridge_m``. These are interval lengths along the
+convex boundary, not Hausdorff distances. Both ``full_volume_covered`` and
+``whole_plate_volume_covered`` remain false. ``compute_metrics=True`` evaluates
+the original complete mesh; its sampled face/volume metrics do not expand the
+rim certificate into a whole-object coverage guarantee.
+
 FAST is an offline preprocessing operation, not a faster GPU collision query.
 It uses OpenCV for projected triangle rasterization, SciPy for optimization,
 and CoACD in an isolated subprocess (30-second timeout) when escalation is
@@ -115,6 +193,14 @@ needed. Failed or timed-out decomposition is logged and recorded in
 ``result.debug_info["fast"]["partition"]``. Quality diagnostics under
 ``pre_clip_audit`` describe the fit before shared clipping and dtype conversion;
 ``compute_metrics=True`` separately evaluates the returned spheres.
+
+For a compound mesh whose components are all closed and outward-oriented,
+quality metrics use the union of those solids. Interior sampling and outward
+distances query individual components; combined-mesh parity and internal
+overlapping faces do not define the solid boundary. No hole repair is performed
+for this classification. Surface gaps still sample the authored surfaces, and
+``volume_ratio`` compares summed sphere volumes to the source's summed component
+volume, which can count overlaps more than once.
 
 The default changes for direct fitting, obstacle bounding spheres, robot
 building/refitting, and attachment fitting. Explicit ``MORPHIT``, ``VOXEL``,
