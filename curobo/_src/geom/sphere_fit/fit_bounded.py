@@ -3,14 +3,17 @@
 """Budgeted full-volume covers with a source-relative outward distance bound.
 
 Closed components must have an interior polyhedral kernel. Their convex hulls
-are covered by tetrahedral subdivision, while verified kernel witnesses bound
+are covered by convex cell subdivision, while verified kernel witnesses bound
 any hull excess. Unsupported geometry and exhausted budgets raise explicitly.
 This is offline preprocessing; no random samples establish either guarantee.
 """
 
+import heapq
+
 import numpy as np
-from scipy.optimize import LinearConstraint, linprog, minimize
-from scipy.spatial import ConvexHull, HalfspaceIntersection
+from scipy.optimize import LinearConstraint, NonlinearConstraint, linprog, minimize
+from scipy.spatial import ConvexHull, HalfspaceIntersection, cKDTree
+from trimesh import Trimesh
 
 _MARGIN = 1e-7
 _MAX_CELLS = 500000
@@ -125,7 +128,16 @@ def _tetrahedra(hull):
     return cells
 
 
-def _split(cell):
+def _split(cell: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Bisect a convex cell while preserving its entire volume."""
+    if len(cell) == 8:
+        axis = max(range(3), key=lambda i: np.linalg.norm(cell[1 << i] - cell[0]))
+        low = np.array([i for i in range(8) if not i & (1 << axis)])
+        high = low | (1 << axis)
+        midpoint = (cell[low] + cell[high]) / 2
+        left, right = cell.copy(), cell.copy()
+        left[high], right[low] = midpoint, midpoint
+        return left, right
     i, j = max(
         ((i, j) for i in range(4) for j in range(i + 1, 4)),
         key=lambda pair: np.linalg.norm(cell[pair[0]] - cell[pair[1]]),
@@ -134,6 +146,32 @@ def _split(cell):
     left, right = cell.copy(), cell.copy()
     left[i], right[j] = midpoint, midpoint
     return left, right
+
+
+def _volume_cells(hull: Trimesh) -> np.ndarray:
+    """Use an enclosing orthogonal box only for verified rectangular hulls."""
+    vertices = np.asarray(hull.vertices)
+    if len(vertices) == 8:
+        normals = ConvexHull(vertices).equations[:, :3]
+        x = normals[0]
+        candidates = normals[np.abs(normals @ x) < 1e-10]
+        if len(candidates):
+            y = candidates[0] - (candidates[0] @ x) * x
+            y /= np.linalg.norm(y)
+            axes = np.array([x, y, np.cross(x, y)])
+            origin = vertices.mean(axis=0)
+            local = (vertices - origin) @ axes.T
+            lower, upper = local.min(axis=0), local.max(axis=0)
+            tolerance = np.finfo(float).eps * max(1., np.abs(vertices).max()) * 128
+            if np.all(np.minimum(abs(local - lower), abs(local - upper)) <= tolerance):
+                corners = np.array([
+                    [upper[j] if i & (1 << j) else lower[j] for j in range(3)]
+                    for i in range(8)
+                ])
+                # Rounding reserve makes this an enclosure, never a shrunken OBB.
+                corners += np.where(corners == upper, tolerance, -tolerance)
+                return (corners @ axes + origin)[None]
+    return _tetrahedra(hull)
 
 
 def _witness_ball(point, equations, centroid, outward):
@@ -173,11 +211,88 @@ def _witness_ball(point, equations, centroid, outward):
     return centers[best], radii[best]
 
 
-def _cover(hull, outward, proposal_budget):
+def _cell_ball(
+    cell: np.ndarray, equations: np.ndarray, centroid: np.ndarray, outward: float,
+    box: np.ndarray | None = None,
+) -> tuple[np.ndarray, float] | None:
+    """Return a maximal admissible ball if it certifies the entire cell."""
+    center = (cell.mean(axis=0) * 0.999999 + centroid * 0.000001)
+    center = center.astype(np.float32).astype(float)
+    inside = float(-(equations[:, :3] @ center + equations[:, 3]).max())
+    radius = float(np.nextafter(np.float32(inside + outward * 0.99), np.float32(-np.inf)))
+    if (inside >= 0 and radius > 0 and radius - inside <= outward
+            and np.linalg.norm(cell - center, axis=1).max() <= radius - _MARGIN):
+        return center, radius
+    center, radius = _witness_ball(cell.mean(axis=0), equations, centroid, outward)
+    if np.linalg.norm(cell - center, axis=1).max() <= radius - _MARGIN:
+        return center, radius
+    if box is not None:
+        edges = np.array([box[1 << i] - box[0] for i in range(3)])
+        axes = edges / np.linalg.norm(edges, axis=1)[:, None]
+        source_half = np.linalg.norm(edges, axis=1) / 2
+        origin = box.mean(axis=0)
+        points = (cell - origin) @ axes.T
+        middle = (points.max(axis=0) + points.min(axis=0)) / 2
+        half = (points.max(axis=0) - points.min(axis=0)) / 2
+        # At radius r, the best box-constrained center is the cell midpoint
+        # projected onto the source box eroded by r - outward. The clearance
+        # is concave in r; its derivative locates the global maximum.
+        lower, upper = 0., float(source_half.min() + outward * 0.98)
+        for _ in range(32):
+            trial = (lower + upper) / 2
+            shift = np.abs(middle) - source_half + trial - outward * 0.98
+            distance = half + np.maximum(shift, 0)
+            if distance[shift > 0].sum() <= np.linalg.norm(distance):
+                lower = trial
+            else:
+                upper = trial
+        trial = (lower + upper) / 2
+        extent = np.maximum(source_half - trial + outward * 0.98, 0)
+        local_center = np.clip(middle, -extent, extent)
+        center = (local_center @ axes + origin).astype(np.float32).astype(float)
+        inside = float(-(equations[:, :3] @ center + equations[:, 3]).max())
+        radius = float(np.nextafter(np.float32(inside + outward * 0.99), np.float32(-np.inf)))
+        if (inside >= 0 and radius > 0 and radius - inside <= outward
+                and np.linalg.norm(cell - center, axis=1).max() <= radius - _MARGIN):
+            return center, radius
+        return None
+    # Solve the convex enclosing-ball feasibility problem before refining.
+    # Surface witnesses maximize a local patch, not containment of a volume cell.
+    normals, offsets = equations[:, :3], equations[:, 3]
+
+    def constraint(x: np.ndarray) -> np.ndarray:
+        return x[3] - np.linalg.norm(cell - x[:3], axis=1)
+
+    def jacobian(x: np.ndarray) -> np.ndarray:
+        delta = cell - x[:3]
+        distance = np.linalg.norm(delta, axis=1)
+        return np.c_[delta / np.maximum(distance[:, None], 1e-15), np.ones(len(cell))]
+
+    solved = minimize(
+        lambda x: x[3], np.r_[center, radius], jac=lambda x: np.array([0., 0., 0., 1.]),
+        method="SLSQP", constraints=[
+            LinearConstraint(np.c_[normals, np.ones(len(normals))],
+                             -np.inf, outward * 0.98 - offsets),
+            NonlinearConstraint(constraint, 2 * _MARGIN, np.inf, jac=jacobian),
+        ], options={"ftol": 1e-12, "maxiter": 30},
+    )
+    if solved.success:
+        center = solved.x[:3].astype(np.float32).astype(float)
+        inside = float(-(normals @ center + offsets).max())
+        radius = float(np.nextafter(np.float32(inside + outward * 0.99), np.float32(-np.inf)))
+        if (inside >= 0 and radius > 0 and radius - inside <= outward
+                and np.linalg.norm(cell - center, axis=1).max() <= radius - _MARGIN):
+            return center, radius
+    return None
+
+
+def _cover(hull: Trimesh, outward: float, proposal_budget: int) -> tuple[np.ndarray, np.ndarray]:
     equations = ConvexHull(hull.vertices).equations
     centers, radii = np.empty((0, 3)), np.empty(0)
     centroid = hull.vertices.mean(axis=0)
-    stack = [(cell, 0) for cell in _tetrahedra(hull)]
+    cells = _volume_cells(hull)
+    box = cells[0] if cells.shape[1] == 8 else None
+    stack = [(cell, 0) for cell in cells]
     visited = 0
 
     def add(point):
@@ -193,68 +308,87 @@ def _cover(hull, outward, proposal_budget):
         visited += 1
         if visited > _MAX_CELLS:
             raise ValueError("BOUNDED cell budget exhausted during fitting")
-        distances = np.linalg.norm(cell[:, None] - centers[None], axis=-1)
-        if len(radii) and np.any(np.all(distances <= radii[None] - _MARGIN, axis=0)):
+        if box is not None:
+            nearby = np.flatnonzero(np.linalg.norm(centers - cell[0], axis=1) <= radii - _MARGIN)
+        else:
+            nearby = np.arange(len(radii))
+        distances = np.linalg.norm(cell[:, None] - centers[None, nearby], axis=-1)
+        if len(nearby) and np.any(np.all(distances <= radii[None, nearby] - _MARGIN, axis=0)):
             continue
-        gaps = np.min(distances - radii[None], axis=1) if len(radii) else np.full(4, np.inf)
-        if np.any(gaps > _MARGIN):
+        ball = _cell_ball(cell, equations, centroid, outward, box)
+        if ball is not None:
+            if len(radii) >= proposal_budget:
+                raise ValueError("BOUNDED sphere proposal budget exhausted")
+            center, radius = ball
+            centers = np.concatenate([centers, center[None]])
+            radii = np.append(radii, radius)
+            continue
+        gaps = (np.min(distances - radii[None, nearby], axis=1)
+                if len(nearby) else np.full(len(cell), np.inf))
+        if box is None and np.any(gaps > _MARGIN):
             for point in cell[gaps > _MARGIN]:
                 add(point)
             stack.append((cell, depth))
         elif depth >= _MAX_DEPTH:
-            if len(radii) >= proposal_budget:
-                raise ValueError("BOUNDED sphere proposal budget exhausted")
-            # Finish an unresolved small tetrahedron with one enclosing ball.
-            # The same outward bound still applies; depth never bypasses it.
-            center = (cell.mean(axis=0) * 0.999999 + centroid * 0.000001)
-            center = center.astype(np.float32).astype(float)
-            radius = float(np.nextafter(
-                np.float32(np.linalg.norm(cell - center, axis=1).max() + 1e-6),
-                np.float32(np.inf),
-            ))
-            inside = float(-(equations[:, :3] @ center + equations[:, 3]).max())
-            if inside < 0 or radius - inside > outward:
-                raise ValueError("BOUNDED subdivision depth cannot satisfy the outward bound")
-            centers = np.concatenate([centers, center[None]])
-            radii = np.append(radii, radius)
-            stack.append((cell, depth))
+            raise ValueError("BOUNDED subdivision depth cannot satisfy the outward bound")
         else:
             stack.extend((child, depth + 1) for child in _split(cell))
     return centers, radii
 
 
-def _cover_masks(hull, centers, radii):
-    """Record every sphere containing each terminal tetrahedron."""
-    stack = [(cell, 0) for cell in _tetrahedra(hull)]
+def _cover_masks(
+    hull: Trimesh, centers: np.ndarray, radii: np.ndarray,
+) -> tuple[list[int], int]:
+    """Record every sphere containing each terminal convex volume cell."""
+    stack = [(cell, 0) for cell in _volume_cells(hull)]
     masks = [0] * len(radii)
+    tree = cKDTree(centers)
+    search_radius = float(radii.max() + _MARGIN)
     visited = accepted = 0
     while stack:
         cell, depth = stack.pop()
         visited += 1
         if visited > _MAX_CELLS or depth > _MAX_DEPTH:
             raise ValueError("BOUNDED full-volume verification budget exhausted")
-        distances = np.linalg.norm(cell[:, None] - centers[None], axis=-1)
-        containing = np.flatnonzero(np.all(distances <= radii[None] - _MARGIN, axis=0))
+        # A sphere containing the whole cell must contain its first vertex.
+        candidates = np.asarray(tree.query_ball_point(cell[0], search_radius), dtype=int)
+        distances = np.linalg.norm(cell[:, None] - centers[None, candidates], axis=-1)
+        containing = candidates[np.all(distances <= radii[None, candidates] - _MARGIN, axis=0)]
         if len(containing):
             bit = 1 << accepted
             for index in containing:
                 masks[index] |= bit
             accepted += 1
-        elif np.any(np.all(distances > radii[None] + _MARGIN, axis=1)):
-            raise ValueError("BOUNDED result has uncovered volume")
         else:
+            for point in cell:
+                nearby = np.asarray(tree.query_ball_point(point, search_radius), dtype=int)
+                if not np.any(np.linalg.norm(centers[nearby] - point, axis=1)
+                              <= radii[nearby] + _MARGIN):
+                    raise ValueError("BOUNDED result has uncovered volume")
             stack.extend((child, depth + 1) for child in _split(cell))
     return masks, accepted
 
 
-def _compress(hull, centers, radii):
+def _compress(
+    hull: Trimesh, centers: np.ndarray, radii: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
     masks, count = _cover_masks(hull, centers, radii)
     uncovered = (1 << count) - 1
     selected = []
+    candidates = [(-mask.bit_count(), index) for index, mask in enumerate(masks)]
+    heapq.heapify(candidates)
     while uncovered:
-        index = max(range(len(radii)), key=lambda i: (masks[i] & uncovered).bit_count())
-        if not masks[index] & uncovered:
+        if not candidates:
             raise ValueError("BOUNDED compression lost a certified cell")
+        _, index = heapq.heappop(candidates)
+        score = (masks[index] & uncovered).bit_count()
+        if not score:
+            continue
+        # Stale scores are upper bounds because uncovered only shrinks.
+        # The index tie-break preserves the original deterministic greedy order.
+        if candidates and (-score, index) > candidates[0]:
+            heapq.heappush(candidates, (-score, index))
+            continue
         selected.append(index)
         uncovered &= ~masks[index]
     return centers[selected], radii[selected]

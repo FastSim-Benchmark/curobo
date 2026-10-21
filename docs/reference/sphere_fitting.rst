@@ -77,7 +77,7 @@ The main function is :func:`curobo.sphere_fit.fit_spheres_to_mesh`:
 Fit Types
 ----------
 
-cuRobo provides six methods via :class:`curobo.sphere_fit.SphereFitType`:
+cuRobo provides seven fitting selections via :class:`curobo.sphere_fit.SphereFitType`:
 
 .. list-table::
    :header-rows: 1
@@ -94,6 +94,18 @@ cuRobo provides six methods via :class:`curobo.sphere_fit.SphereFitType`:
        ``max_protrusion_m > 1e-5``. Verifies complete component volume coverage
        and a source-relative outward distance bound after output conversion
        and clipping. Unsupported geometry and insufficient capacity raise.
+   * - ``AUTO``
+     - Routes explicit ``max_protrusion_m`` requests to BOUNDED. Otherwise,
+       routes a single closed rectangular plate with an explicit 4--50 sphere
+       budget to RIM when its thickness is at most 20% of its intermediate
+       extent. All other inputs use FAST, including compounds and requests
+       without an explicit budget. Does not retry another method after failure.
+       ``debug_info["routing"]`` records the selected backend and reason;
+       ``debug_info["fit_type"]`` identifies the actual backend. Automatic RIM
+       selection certifies the outer contour band, not the filled volume or
+       a source-relative outward bound. Explicit selections and defaults remain
+       unchanged. For a phone-sized rectangular plate, use
+       ``fit_type=SphereFitType.AUTO, num_spheres=40``.
    * - ``RIM``
      - Requires an explicit budget in 4--50. Covers a plate's complete
        outer convex projected contour at every height in its observed rim band.
@@ -125,10 +137,16 @@ on each component hull's excess is deducted from the outward budget before
 sphere fitting. For nontrivial excess, the bound is tightened by partitioning
 the hull into source-face cones and constructing feasible witnesses inside
 each source tetrahedron. This avoids extrapolating one shallow local dent
-across the entire component; excessive concavity is still rejected. Tetrahedral containment checks
+across the entire component; excessive concavity is still rejected. Convex cell containment checks
 cover complete volumes, with a 0.1 micrometre numerical containment margin,
 rather than relying on surface samples. Sphere deletion retains coverage of
-every certified terminal cell. Refinement is bounded by 32 levels and 500000
+every certified terminal cell. Verified rectangular hulls use orthogonal box
+subdivision and a bounded radius search for a sphere covering each whole cell.
+Other hulls retain tetrahedral subdivision, with enclosing-ball feasibility
+checked before further refinement. Every candidate is checked after numerical
+conversion. Compression uses spatial sphere queries and deterministic lazy
+greedy selection; final output coverage is independently checked again.
+Refinement is bounded by 32 levels and 500000
 cell visits per component per verification pass; exhaustion raises explicitly.
 The output supports float32 and float64. BOUNDED never truncates its sphere set
 or falls back to another algorithm. Clipping that invalidates coverage raises.

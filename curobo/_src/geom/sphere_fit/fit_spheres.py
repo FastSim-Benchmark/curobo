@@ -94,6 +94,29 @@ def _preserve_clip_plane_precision(
     result.num_spheres = len(result.radii)
 
 
+def _select_auto_fit(
+    mesh: trimesh.Trimesh, budget: Optional[int], outward: Optional[float],
+) -> tuple[SphereFitType, str]:
+    """Select a backend without weakening an explicit outward constraint."""
+    if outward is not None:
+        return SphereFitType.BOUNDED, "explicit_outward_bound"
+    if (isinstance(budget, (bool, numpy.bool_))
+            or not isinstance(budget, (int, numpy.integer)) or not 4 <= budget <= 50):
+        return SphereFitType.FAST, "budget_outside_explicit_rim_range"
+    vertices = numpy.unique(numpy.asarray(mesh.vertices), axis=0)
+    if (len(vertices) != 8 or not mesh.is_volume or mesh.body_count != 1):
+        return SphereFitType.FAST, "not_single_rectangular_plate"
+    transform, extents = trimesh.bounds.oriented_bounds(mesh)
+    dimensions = numpy.sort(extents)
+    if dimensions[0] > 0.2 * dimensions[1]:
+        return SphereFitType.FAST, "not_thin_plate"
+    local = trimesh.transform_points(vertices, transform)
+    tolerance = float(extents.max()) * 1e-8
+    if not numpy.all(numpy.abs(numpy.abs(local) - extents / 2) <= tolerance):
+        return SphereFitType.FAST, "not_rectangular_plate"
+    return SphereFitType.RIM, "single_rectangular_plate_with_small_budget"
+
+
 def fit_spheres_to_mesh(
     mesh: trimesh.Trimesh,
     num_spheres: Optional[int] = None,
@@ -123,7 +146,11 @@ def fit_spheres_to_mesh(
             doubles it; ``0.5`` halves it.  Practical range: ``0.1`` -- ``10.0``.
         surface_radius: Radius added to surface-sampled spheres.  Only affects
             the ``SURFACE`` fit type and the surface-sampling fallback.
-        fit_type: Fitting algorithm, FAST by default; see :class:`SphereFitType`.
+        fit_type: Fitting algorithm, FAST by default. AUTO routes an explicit
+            outward bound to BOUNDED; a single rectangular plate with thickness
+            at most 20% of its intermediate extent and an explicit 4--50 budget
+            to RIM; other requests to FAST. RIM certifies only the contour band.
+            Explicit backend selections are never rerouted.
         iterations: Optimization iterations (only used by ``MORPHIT``).
         compute_metrics: When True, compute quality metrics (coverage,
             protrusion, surface gap, volume ratio) on the result.
@@ -147,7 +174,8 @@ def fit_spheres_to_mesh(
             Metrics describe the final clipped spheres.
             This is an object-local plane, not a world-gravity constraint.
         max_protrusion_m: Required positive source-relative outward bound for
-            BOUNDED. Other methods reject this parameter. BOUNDED requires an
+            BOUNDED. AUTO selects BOUNDED when this is supplied; explicitly
+            selected other methods reject this parameter. BOUNDED requires an
             explicit sphere capacity and closed components with a verified
             interior kernel; unsupported geometry or insufficient capacity
             raises instead of returning an approximate cover.
@@ -156,6 +184,11 @@ def fit_spheres_to_mesh(
         A :class:`SphereFitResult` with sphere positions, radii, and
         optionally quality metrics.
     """
+    routing = None
+    if fit_type == SphereFitType.AUTO:
+        fit_type, reason = _select_auto_fit(mesh, num_spheres, max_protrusion_m)
+        routing = {"requested_fit_type": "auto", "selected_fit_type": fit_type.value,
+                   "reason": reason}
     if fit_type == SphereFitType.RIM:
         if num_spheres is None:
             raise ValueError("RIM requires an explicit sphere capacity in [4, 50]")
@@ -317,6 +350,8 @@ def fit_spheres_to_mesh(
         },
     )
 
+    if routing is not None:
+        result.debug_info["routing"] = routing
     if fast_diagnostics is not None:
         result.debug_info["fast"] = fast_diagnostics
 

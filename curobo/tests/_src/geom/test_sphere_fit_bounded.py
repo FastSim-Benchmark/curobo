@@ -102,6 +102,81 @@ def test_fast_does_not_silently_ignore_requested_bound():
         fit_spheres_to_mesh(trimesh.creation.box(), max_protrusion_m=0.002)
 
 
+@pytest.mark.parametrize("transformed", [False, True])
+def test_thin_phone_sized_box_has_bounded_refinement(monkeypatch, transformed):
+    """Cover a thin solid without exhausting refinement on sphere seams."""
+    import curobo._src.geom.sphere_fit.fit_bounded as module
+
+    monkeypatch.setattr(module, "_MAX_CELLS", 20000)
+    mesh = trimesh.creation.box([0.0705, 0.130, 0.0085])
+    if transformed:
+        mesh.apply_transform(trimesh.transformations.rotation_matrix(0.7, [1, 2, 3]))
+        mesh.apply_translation([0.1, -0.2, 0.3])
+    result = fit(mesh, num_spheres=8192, max_protrusion_m=0.0005, compute_metrics=False)
+    assert result.debug_info["bounded"]["full_volume_covered"]
+    assert result.debug_info["bounded"]["verified_max_protrusion_m"] <= 0.0005
+    assert result.num_spheres <= 8192
+    assert not result.debug_info["fallback_used"]
+
+
+def test_skewed_hexahedron_is_not_treated_as_rectangular_volume():
+    """A near-box cannot replace the actual source with an approximate OBB."""
+    import curobo._src.geom.sphere_fit.fit_bounded as module
+
+    mesh = trimesh.creation.box([0.01, 0.02, 0.003])
+    mesh.vertices[:, 0] += mesh.vertices[:, 2] * 0.1
+    assert module._volume_cells(mesh).shape == (12, 4, 3)
+    result = fit(mesh)
+    assert result.debug_info["bounded"]["full_volume_covered"]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_many_thin_components_preserve_ownership_and_gap(reverse):
+    """Keep each of 44 generated solids independently certified."""
+    parts = []
+    for index in range(44):
+        part = trimesh.creation.box([0.003, 0.008, 0.0006])
+        part.apply_translation([index * 0.006, 0, 0])
+        parts.append(part)
+    mesh = trimesh.util.concatenate(parts[::-1] if reverse else parts)
+    result = fit(mesh, num_spheres=8192, max_protrusion_m=0.0005, compute_metrics=False)
+    proof = result.debug_info["bounded"]
+    assert proof["full_volume_covered"]
+    assert len(proof["components"]) == 44
+    assert set(proof["sphere_components"]) == set(range(44))
+    gap = torch.tensor([0.003, 0, 0])
+    assert (torch.linalg.vector_norm(result.centers - gap, dim=1) > result.radii).all()
+
+
+@pytest.mark.parametrize("masks", [
+    [0b0011, 0b1100, 0b0101, 0b1000],
+    [0b0111, 0b1011, 0b1100, 0b1000, 0],
+    [0b0001, 0b0010, 0b0100, 0b1000],
+])
+def test_lazy_compression_preserves_greedy_selection(monkeypatch, masks):
+    """Stale heap bounds preserve all cells and the original tie order."""
+    import curobo._src.geom.sphere_fit.fit_bounded as module
+
+    monkeypatch.setattr(module, "_cover_masks", lambda *_: (masks, 4))
+    uncovered, expected = 0b1111, []
+    while uncovered:
+        index = max(range(len(masks)), key=lambda i: (masks[i] & uncovered).bit_count())
+        expected.append(index)
+        uncovered &= ~masks[index]
+    centers = np.arange(len(masks) * 3).reshape(-1, 3)
+    selected, _ = module._compress(None, centers, np.ones(len(masks)))
+    np.testing.assert_array_equal(selected, centers[expected])
+
+
+def test_compression_cannot_accept_incomplete_cell_masks(monkeypatch):
+    """An exhausted heap cannot silently discard an uncovered volume cell."""
+    import curobo._src.geom.sphere_fit.fit_bounded as module
+
+    monkeypatch.setattr(module, "_cover_masks", lambda *_: ([0b0011], 4))
+    with pytest.raises(ValueError, match="lost a certified cell"):
+        module._compress(None, np.zeros((1, 3)), np.ones(1))
+
+
 @pytest.mark.parametrize("outward,accepted", [(0.002, True), (0.00001, False)])
 def test_depth_terminal_ball_still_obeys_outward_constraint(monkeypatch, outward, accepted):
     import curobo._src.geom.sphere_fit.fit_bounded as module
@@ -115,4 +190,4 @@ def test_depth_terminal_ball_still_obeys_outward_constraint(monkeypatch, outward
     else:
         c, r = module._cover(mesh, outward, 256)
         _, count = module._cover_masks(mesh, c, r)
-        assert count == len(mesh.faces)
+        assert count == len(module._volume_cells(mesh))

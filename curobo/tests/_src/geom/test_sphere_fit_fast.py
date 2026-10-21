@@ -17,6 +17,93 @@ from curobo.sphere_fit import SphereFitType, fit_spheres_to_mesh
 from curobo.types import DeviceCfg
 
 
+@pytest.mark.parametrize("budget", [4, 40, 50])
+def test_auto_routes_phone_box_to_rim_spheres(budget):
+    """An explicit small budget can select the verified outer contour proxy."""
+    mesh = trimesh.creation.box([0.0705, 0.130, 0.0085])
+    mesh.apply_transform(trimesh.transformations.rotation_matrix(0.4, [1, 2, 3]))
+    result = fit_spheres_to_mesh(
+        mesh, num_spheres=budget, fit_type=SphereFitType.AUTO, device_cfg=DeviceCfg(device="cpu")
+    )
+    assert result.num_spheres == budget
+    assert result.debug_info["fit_type"] == "rim"
+    assert result.debug_info["routing"]["requested_fit_type"] == "auto"
+    assert result.debug_info["rim"]["outer_contour_height_band_covered"]
+    assert not result.debug_info["rim"]["full_volume_covered"]
+
+
+@pytest.mark.parametrize("kind", ["cube", "compound", "skewed", "large_budget"])
+def test_auto_keeps_other_geometry_on_fast(monkeypatch, kind):
+    """Automatic contour selection is limited to a single rectangular plate."""
+    import curobo._src.geom.sphere_fit.fit_fast as backend
+
+    mesh = trimesh.creation.box([0.07, 0.13, 0.008])
+    budget = 40
+    if kind == "cube":
+        mesh = trimesh.creation.box()
+    elif kind == "compound":
+        other = mesh.copy()
+        other.apply_translation([0.2, 0, 0])
+        mesh = trimesh.util.concatenate([mesh, other])
+    elif kind == "skewed":
+        mesh.vertices[:, 0] += mesh.vertices[:, 2] * 0.2
+    else:
+        budget = 64
+    monkeypatch.setattr(backend, "fast_fit_mesh",
+                        lambda *_: (np.zeros((1, 3)), np.array([0.1]), {}))
+    result = fit_spheres_to_mesh(
+        mesh, num_spheres=budget, fit_type=SphereFitType.AUTO,
+        device_cfg=DeviceCfg(device="cpu"),
+    )
+    assert result.debug_info["fit_type"] == "fast"
+
+
+def test_auto_outward_bound_requires_bounded_capacity():
+    """An explicit outward contract never routes to an approximate method."""
+    with pytest.raises(ValueError, match="budget|capacity"):
+        fit_spheres_to_mesh(
+            trimesh.creation.box([0.07, 0.13, 0.008]), num_spheres=1,
+            fit_type=SphereFitType.AUTO, max_protrusion_m=0.0005,
+            device_cfg=DeviceCfg(device="cpu"),
+        )
+
+
+def test_auto_outward_bound_selects_certified_volume_fit():
+    """A feasible constrained request retains the actual final volume proof."""
+    result = fit_spheres_to_mesh(
+        trimesh.creation.box([0.001, 0.003, 0.0003]), num_spheres=40,
+        fit_type=SphereFitType.AUTO, max_protrusion_m=0.002,
+        device_cfg=DeviceCfg(device="cpu"),
+    )
+    assert result.debug_info["fit_type"] == "bounded"
+    assert result.debug_info["bounded"]["full_volume_covered"]
+
+
+@pytest.mark.parametrize("budget", [True, 0, 1.5, 257])
+def test_auto_does_not_repair_invalid_budget(budget):
+    """Backend budget rejection remains visible to the caller."""
+    with pytest.raises(ValueError):
+        fit_spheres_to_mesh(
+            trimesh.creation.box([0.07, 0.13, 0.008]), num_spheres=budget,
+            fit_type=SphereFitType.AUTO, device_cfg=DeviceCfg(device="cpu"),
+        )
+
+
+def test_auto_preserves_selected_backend_failure(monkeypatch):
+    """A selected contour contract cannot silently become a FAST proxy."""
+    import curobo._src.geom.sphere_fit.fit_rim as backend
+
+    def reject(*args, **kwargs):
+        raise ValueError("contour cannot satisfy clipping")
+
+    monkeypatch.setattr(backend, "rim_fit_mesh", reject)
+    with pytest.raises(ValueError, match="contour cannot satisfy clipping"):
+        fit_spheres_to_mesh(
+            trimesh.creation.box([0.07, 0.13, 0.008]), num_spheres=40,
+            fit_type=SphereFitType.AUTO, device_cfg=DeviceCfg(device="cpu"),
+        )
+
+
 @pytest.mark.parametrize("density,budget", [(0.5, 16), (1.0, 32), (1e308, 256)])
 def test_fast_automatic_budget_and_large_density(monkeypatch, density, budget):
     """Automatic budgets scale with density and saturate without overflow."""

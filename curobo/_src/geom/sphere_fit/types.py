@@ -32,6 +32,8 @@ class SphereFitType(Enum):
     MORPHIT = "morphit"
     #: Budgeted visual-hull fitting with conditional convex decomposition.
     FAST = "fast"
+    #: Constraint-aware routing; small-budget rectangular plates use RIM.
+    AUTO = "auto"
     #: Full-volume cover with a verified source-relative outward distance bound.
     BOUNDED = "bounded"
     #: Thin-plate outer convex contour band, without filled-face/volume coverage.

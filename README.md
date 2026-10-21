@@ -161,6 +161,12 @@ Select `SphereFitType.MORPHIT`, `VOXEL`, or `SURFACE` explicitly to retain a leg
 method. Shared clipping and output device/dtype conversion still apply.
 See [sphere fitting](docs/reference/sphere_fitting.rst) for budgets and diagnostics.
 
+Opt-in `SphereFitType.AUTO` routes small-budget rectangular plates to RIM,
+explicit outward-bound requests to BOUNDED, and other geometry to FAST.
+For a phone-sized rectangular plate, `num_spheres=40` selects a 40-sphere
+outer contour proxy. This does not certify the filled volume. Routing decisions
+are recorded in `debug_info["routing"]`; existing defaults remain unchanged.
+
 An explicit `SphereFitType.RIM` selection fits a plate's outer convex
 projected contour and its observed rim-height band with 4--50 spheres, without
 a height-to-width cutoff. It uses the complete compound to avoid treating
