@@ -187,6 +187,7 @@ def test_missing_fk_is_explicit_and_invalid_layout_is_not_silently_ignored():
 def test_native_unreachable_ik_retains_failed_constraints():
     """The native failed IK result contains diagnostics without accepting the goal."""
     config = InverseKinematicsCfg.create("franka.yml", num_seeds=4, use_cuda_graph=False)
+    config.detailed_failure_diagnostics = True
     solver = InverseKinematics(config)
     try:
         frames = solver.kinematics.tool_frames

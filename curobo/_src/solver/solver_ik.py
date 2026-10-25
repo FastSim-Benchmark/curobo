@@ -10,6 +10,7 @@ collision checking.
 from __future__ import annotations
 
 # Standard Library
+from dataclasses import replace
 from typing import Dict, Optional
 
 # Third Party
@@ -21,7 +22,7 @@ from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
 # CuRobo
 from curobo._src.geom.collision.collision_scene import SceneCollision
 from curobo._src.geom.types import SceneCfg
-from curobo._src.robot.kinematics.kinematics import KinematicsState
+from curobo._src.robot.kinematics.kinematics import Kinematics, KinematicsState
 from curobo._src.rollout.goal_registry import GoalRegistry
 from curobo._src.rollout.metrics import RolloutMetrics
 from curobo._src.solver.ik_diagnostics import ik_failure_diagnostics
@@ -32,6 +33,12 @@ from curobo._src.solver.solve_state import SolveState
 from curobo._src.solver.solver_core import SolverCore
 from curobo._src.solver.solver_ik_cfg import IKSolverCfg
 from curobo._src.solver.solver_ik_result import IKSolverResult
+from curobo._src.solver.solver_motion_quality import (
+    combine_independent_tool_candidates,
+    motion_quality_cost,
+    motion_quality_terms,
+    select_motion_candidates,
+)
 from curobo._src.state.state_joint import JointState
 from curobo._src.state.state_robot import RobotState
 from curobo._src.types.tool_pose import GoalToolPose, ToolPose
@@ -105,6 +112,40 @@ class IKSolver:
         """Initializes the IK solver."""
         self.config = config
         self.core = SolverCore(config.core_cfg, scene_collision_checker)
+        self._quality_kinematics = (
+            Kinematics(config.robot_config.kinematics, compute_spheres=False)
+            if config.prefer_smooth_motion else None
+        )
+        self._independent_tool_joints = None
+        self._local_tool_solvers: list[SeedIKSolver] = []
+        if config.prefer_smooth_motion and config.max_goalset == 1:
+            params = config.robot_config.kinematics.kinematics_config
+            tools = len(params.tool_frames)
+            masks = params.joint_affects_endeffector.reshape(-1, tools).T.bool()
+            if tools > 1 and not bool((masks.sum(dim=0) > 1).any()):
+                self._independent_tool_joints = masks
+                for tool, name in enumerate(params.tool_frames):
+                    single = params.clone()
+                    single.tool_frames = [name]
+                    single.tool_frame_map = params.tool_frame_map[tool : tool + 1].clone()
+                    single.joint_affects_endeffector = (
+                        params.joint_affects_endeffector.reshape(-1, tools)[:, tool : tool + 1]
+                        .flatten().clone()
+                    )
+                    kin = replace(
+                        config.robot_config.kinematics,
+                        tool_frames=[name], kinematics_config=single,
+                    )
+                    robot = replace(config.robot_config, kinematics=kin, dynamics=None)
+                    self._local_tool_solvers.append(SeedIKSolver(SeedIKSolverCfg.create(
+                        robot=robot, num_seeds=config.num_seeds,
+                        max_iterations=40, inner_iterations=20,
+                        use_cuda_graph=config.use_cuda_graph, device_cfg=config.device_cfg,
+                        joint_limit_weight=1.0, lambda_initial=1.0,
+                    )))
+        rows = torch.arange(config.num_seeds, **config.device_cfg.as_torch_dict())[:, None]
+        columns = torch.arange(1, self.action_dim + 1, **config.device_cfg.as_torch_dict())[None]
+        self._tool_seed_offsets = 0.2 * torch.sin(rows * columns * 2.39996323)
 
         self.seed_ik_solver = None
 
@@ -162,6 +203,9 @@ class IKSolver:
                     orientation_weight=self.config.seed_orientation_weight,
                     velocity_weight=self.config.seed_velocity_weight,
                     acceleration_weight=self.config.seed_acceleration_weight,
+                    local_seed_count=(
+                        min(8, self.config.num_seeds // 2) if config.prefer_smooth_motion else 0
+                    ),
                 )
             )
 
@@ -302,6 +346,8 @@ class IKSolver:
         self.core.reset_seed()
 
     def destroy(self):
+        for solver in self._local_tool_solvers:
+            solver.destroy()
         if self.seed_ik_solver is not None:
             self.seed_ik_solver.destroy()
         self.core.destroy()
@@ -370,6 +416,7 @@ class IKSolver:
         seed_config=None,
         return_seeds: int = 1,
         run_optimizer: bool = True,
+        prefer_smooth_motion: Optional[bool] = None,
     ) -> IKSolverResult:
         goal_tool_poses = goal_tool_poses.reorder_links(self.kinematics.tool_frames)
         total_timer = CudaEventTimer().start()
@@ -392,6 +439,16 @@ class IKSolver:
         )
 
         self._update_rollout_params(goal_buffer, include_auxiliary_rollout=False)
+
+        use_quality = (
+            self.config.prefer_smooth_motion
+            if prefer_smooth_motion is None else prefer_smooth_motion
+        )
+        if use_quality and current_state is not None and run_optimizer:
+            return self._solve_motion_quality(
+                coord_position_seed, current_state, num_seeds, return_seeds, total_timer,
+                goal_tool_poses,
+            )
 
         if self.config.exit_early or not run_optimizer:
             metrics_result = self.metrics_rollout.compute_metrics_from_action(coord_position_seed)
@@ -416,6 +473,141 @@ class IKSolver:
         ik_result.total_time = total_timer.stop()
         ik_result.solve_time = opt_time
         return ik_result
+
+    def _endpoint_motion_cost(
+        self, actions: torch.Tensor, current_state: JointState
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Evaluate nine-point joint-interpolation drafts [batch, seeds, dof]."""
+        batch, seeds, dof = actions.shape
+        start = self.get_active_js(current_state).position.view(batch, 1, 1, dof)
+        fraction = torch.linspace(0, 1, 9, device=actions.device, dtype=actions.dtype)
+        path = start + fraction[None, None, :, None] * (actions[:, :, None] - start)
+        state = self._quality_kinematics.compute_kinematics(
+            JointState.from_position(
+                path.reshape(batch * seeds, 9, dof), joint_names=self.joint_names
+            )
+        )
+        tools = state.tool_poses.position.view(batch, seeds, 9, -1, 3)
+        rotations = state.tool_poses.quaternion.view(batch, seeds, 9, -1, 4)
+        per_tool = motion_quality_terms(tools, rotations)
+        return motion_quality_cost(tools, path, rotations), per_tool
+
+    def _solve_motion_quality(
+        self,
+        seeds: torch.Tensor,
+        current_state: JointState,
+        num_seeds: int,
+        return_seeds: int,
+        total_timer: CudaEventTimer,
+        goal_tool_poses: GoalToolPose,
+    ) -> IKSolverResult:
+        """Improve poor feasible seeds without discarding the original alternatives."""
+        batch = seeds.shape[0] // num_seeds
+        metrics = self.metrics_rollout.compute_metrics_from_action(seeds)
+        old = self._get_result(seeds, metrics, num_seeds, num_seeds)
+        # _get_result returns native-ranked actions, not the input seed order.
+        old_actions = old.solution.clone()
+        old_success = old.success.clone()
+        tool_success = old.debug_info["tool_success"].clone()
+        old_cost, old_tool_cost = self._endpoint_motion_cost(old_actions, current_state)
+        best = select_motion_candidates(old_actions, old_success, old_cost, 1)
+        best_cost = torch.gather(old_cost, 1, best).squeeze(1)
+        good = old_success.any(dim=1) & (best_cost <= 0.15)
+        refined = not (self.config.exit_early and bool(good.all()))
+        opt_time = 0.0
+        actions, successful, costs = old_actions, old_success, old_cost
+        tool_cost = old_tool_cost
+        if refined:
+            stages = [(stage, stage.config.num_iters) for stage in self.optimizer.optimizers]
+            # No feasible endpoint: retain the original global optimizer budget.
+            short = bool(old_success.any(dim=1).all())
+            opt_timer = CudaEventTimer().start()
+            try:
+                if short:
+                    for stage, iterations in stages:
+                        inner = stage.config.inner_iters
+                        requested = max(
+                            inner, self.config.quality_refinement_iters // inner * inner
+                        )
+                        stage.update_niters(min(iterations, requested))
+                self.optimizer.reinitialize(seeds)
+                optimized = self.optimizer.optimize(seeds)
+            finally:
+                for stage, iterations in stages:
+                    stage.update_niters(iterations)
+            opt_time = opt_timer.stop()
+            metrics = self.metrics_rollout.compute_metrics_from_action(optimized)
+            new = self._get_result(optimized, metrics, num_seeds, num_seeds)
+            new_actions = new.solution.clone()
+            new_cost, new_tool_cost = self._endpoint_motion_cost(new_actions, current_state)
+            actions = torch.cat([old_actions, new_actions], dim=1)
+            successful = torch.cat([old_success, new.success], dim=1)
+            tool_success = torch.cat([tool_success, new.debug_info["tool_success"]], dim=1)
+            costs = torch.cat([old_cost, new_cost], dim=1)
+            tool_cost = torch.cat([old_tool_cost, new_tool_cost], dim=1)
+        if self._independent_tool_joints is not None:
+            if refined:
+                active_start = self.get_active_js(current_state)
+                for tool, solver in enumerate(self._local_tool_solvers):
+                    local_seed = active_start.position[:, None] + (
+                        self._tool_seed_offsets[None] * self._independent_tool_joints[tool]
+                    )
+                    local_seed = torch.clamp(
+                        local_seed, min=solver.action_min, max=solver.action_max
+                    )
+                    local_goal = GoalToolPose(
+                        tool_frames=solver.tool_frames,
+                        position=goal_tool_poses.position[:, :, tool : tool + 1],
+                        quaternion=goal_tool_poses.quaternion[:, :, tool : tool + 1],
+                    )
+                    local = solver.solve_batch(local_goal, current_state=active_start,
+                        seed_config=local_seed, return_seeds=solver.config.num_seeds)
+                    local_actions = local.solution.clone()
+                    local_cost, local_tool_cost = self._endpoint_motion_cost(
+                        local_actions, current_state
+                    )
+                    converged = torch.zeros(
+                        (batch, solver.config.num_seeds, len(self._local_tool_solvers)),
+                        dtype=torch.bool, device=seeds.device,
+                    )
+                    converged[:, :, tool] = local.success
+                    actions = torch.cat([actions, local_actions], dim=1)
+                    successful = torch.cat([successful, torch.zeros_like(local.success)], dim=1)
+                    costs = torch.cat([costs, local_cost], dim=1)
+                    tool_cost = torch.cat([tool_cost, local_tool_cost], dim=1)
+                    tool_success = torch.cat([tool_success, converged], dim=1)
+            combined = combine_independent_tool_candidates(
+                actions, tool_success, tool_cost, self._independent_tool_joints, num_seeds
+            )
+            combined_actions = combined.reshape_as(seeds)
+            metrics = self.metrics_rollout.compute_metrics_from_action(combined_actions)
+            combined_result = self._get_result(combined_actions, metrics, num_seeds, num_seeds)
+            combined = combined_result.solution.clone()
+            combined_cost, _ = self._endpoint_motion_cost(combined, current_state)
+            actions = torch.cat([actions, combined], dim=1)
+            successful = torch.cat([successful, combined_result.success], dim=1)
+            costs = torch.cat([costs, combined_cost], dim=1)
+        # Reserve half the slots for old feasible endpoints. All slots still
+        # use exactly the native endpoint and full-trajectory acceptance tests.
+        indices = select_motion_candidates(
+            actions, successful, costs, return_seeds,
+            old_count=num_seeds if refined else 0,
+            reserve_old=return_seeds // 2 if refined else 0,
+        )
+        selected = torch.gather(actions, 1, indices[..., None].expand(-1, -1, self.action_dim))
+        padded = selected[:, :1].expand(batch, num_seeds, self.action_dim).clone()
+        padded[:, :return_seeds] = selected
+        final_actions = padded.reshape_as(seeds)
+        metrics = self.metrics_rollout.compute_metrics_from_action(final_actions)
+        selection = torch.arange(return_seeds, device=seeds.device).expand(batch, -1)
+        result = self._get_result(final_actions, metrics, num_seeds, return_seeds, selection)
+        result.debug_info["motion_quality"] = {
+            "refined": refined, "proxy_cost": torch.gather(costs, 1, indices),
+        }
+        self._compute_solution_velocity(result, current_state, return_seeds)
+        result.total_time = total_timer.stop()
+        result.solve_time = opt_time
+        return result
 
     def get_unique_solution(self, roundoff_decimals: int = 2) -> torch.Tensor:
         """Get unique solutions from many feasible solutions for the same problem.
@@ -449,6 +641,7 @@ class IKSolver:
         metrics_result: RolloutMetrics,
         num_seeds: int,
         return_seeds: int,
+        selection_indices: Optional[torch.Tensor] = None,
     ) -> IKSolverResult:
         feasible = metrics_result.costs_and_constraints.get_feasible(
             include_all_hybrid=False,
@@ -508,6 +701,8 @@ class IKSolver:
         topk_values, topk_relative_idx = stable_topk(
             cost_sum_reshaped, k=return_seeds, largest=False, dim=-1
         )
+        if selection_indices is not None:
+            topk_relative_idx = selection_indices
 
         topk_abs_idx = (
             topk_relative_idx + num_seeds * self.goal_registry_manager.batch_helper
@@ -578,6 +773,8 @@ class IKSolver:
             solve_time=0.0,
             debug_info={
                 "seed_idx": topk_abs_idx,
+                "tool_success": (pose_error_topk[..., 0] < self.config.position_tolerance)
+                & (pose_error_topk[..., 1] < self.config.orientation_tolerance),
             },
             optimized_seeds=opt_result.view(
                 batch_size, num_seeds, self.action_dim
@@ -586,6 +783,13 @@ class IKSolver:
         )
 
         if not bool(success.any()):
+            ik_result.debug_info["failed_ik"] = {
+                "seed_count": success.numel(),
+                "feasible_seed_count": feasible_tensor.count_nonzero(),
+                "converged_seed_count": converged.count_nonzero(),
+                "successful_seed_count": success.count_nonzero(),
+            }
+        if self.config.detailed_failure_diagnostics and not bool(success.any()):
             manager = self.metrics_rollout.metrics_constraint_manager
             config = (
                 manager.get_cost("cspace").config
@@ -657,6 +861,7 @@ class IKSolver:
         seed_config=None,
         return_seeds: int = 1,
         run_optimizer: bool = True,
+        prefer_smooth_motion: Optional[bool] = None,
     ) -> IKSolverResult:
         """Solve IK for target tool poses.
 
@@ -666,6 +871,8 @@ class IKSolver:
             seed_config: Optional initial seeds.
             return_seeds: Number of top solutions to return per problem.
             run_optimizer: When False, skip the main optimizer.
+            prefer_smooth_motion: Override endpoint ranking for this call. False
+                permits an original global-seed retry without mutating configuration.
 
         Returns:
             IKSolverResult with solutions ranked by cost.
@@ -767,7 +974,10 @@ class IKSolver:
             current_state=current_state,
             return_seeds=return_seeds,
             run_optimizer=run_optimizer,
+            prefer_smooth_motion=prefer_smooth_motion,
         )
+        if self.seed_ik_solver is not None and self.seed_ik_solver.global_seed_config is not None:
+            result.debug_info["global_seed_config"] = self.seed_ik_solver.global_seed_config
         result.solve_time = timer.stop() + additional_time
         result.total_time = result.solve_time
 

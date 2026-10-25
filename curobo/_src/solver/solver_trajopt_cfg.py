@@ -61,6 +61,8 @@ class TrajOptSolverCfg:
     non_terminal_tool_pose_weight_factor: float = 0.0
     #: Whether to enable self-collision checking during optimization.
     self_collision_check: bool = True
+    #: Rank feasible paths by individual tool detours before timing preferences.
+    prefer_smooth_motion: bool = False
 
     # TrajOpt-specific
     #: Lower bound on the trajectory time step (seconds). The solver will

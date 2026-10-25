@@ -75,6 +75,12 @@ class IKSolverCfg:
     #: Fraction of the batch that must succeed before the solver exits
     #: early. 1.0 means every problem in the batch must succeed.
     exit_early_batch_success_threshold: float = 1.0
+    #: Prefer low-detour endpoints, with bounded refinement of already feasible batches.
+    prefer_smooth_motion: bool = False
+    #: L-BFGS steps for improving a batch that already has a feasible endpoint.
+    quality_refinement_iters: int = 40
+    #: Generate CPU geometry and joint diagnostics on failure; native acceptance is unchanged.
+    detailed_failure_diagnostics: bool = False
     #: Time step for velocity-aware IK. When set, position bounds are
     #: tightened using ``velocity_limits * dt`` relative to
     #: ``current_state``. None disables velocity clamping (standard

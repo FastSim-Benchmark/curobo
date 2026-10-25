@@ -360,20 +360,31 @@ class MotionPlanner:
         solve_time = 0.0
         og_current_state = current_state.clone()
         num_seeds = self.trajopt_solver.config.num_seeds
+        ik_attempts_used = 0
+        pending_global_seeds = None
 
         for current_attempt in range(max_attempts):
             check_time_budget()
+            if ik_attempts_used >= max_attempts:
+                break
             current_state = og_current_state.clone()
             ik_seed_kwargs = (
                 {"seed_config": posture_seeds.endpoint_seeds(current_attempt)}
                 if posture_seeds is not None else {}
             )
+            restoring_global_seeds = pending_global_seeds is not None
+            if restoring_global_seeds:
+                ik_seed_kwargs = {
+                    "seed_config": pending_global_seeds, "prefer_smooth_motion": False,
+                }
+                pending_global_seeds = None
             ik_result = self.ik_solver.solve_pose(
                 goal_tool_poses,
                 return_seeds=num_seeds,
                 current_state=current_state,
                 **ik_seed_kwargs,
             )
+            ik_attempts_used += 1
             total_time += ik_result.total_time
             solve_time += ik_result.solve_time
 
@@ -393,6 +404,10 @@ class MotionPlanner:
                     f"posture={posture_seeds is not None}; candidate_count={candidate_count}; "
                     f"failed_ik={diagnostics}"
                 )
+                if current_attempt == 0 and posture_seeds is None:
+                    pending_global_seeds = (getattr(ik_result, "debug_info", None) or {}).get(
+                        "global_seed_config"
+                    )
                 continue
 
             seed_config = ik_result.solution
@@ -406,7 +421,11 @@ class MotionPlanner:
             )
             finetune_attempts = 1
             finetune_dt_scale = 0.55
-            if current_attempt >= enable_graph_attempt and self.graph_planner is not None:
+            if (
+                current_attempt >= enable_graph_attempt
+                and self.graph_planner is not None
+                and not restoring_global_seeds
+            ):
                 graph_seed = self._get_graph_seed_trajectories(
                     current_state, seed_config,
                 )
@@ -431,6 +450,10 @@ class MotionPlanner:
             solve_time += trajopt_result.solve_time
             if torch.count_nonzero(trajopt_result.success) > 0:
                 break
+            if current_attempt == 0 and posture_seeds is None:
+                pending_global_seeds = (getattr(ik_result, "debug_info", None) or {}).get(
+                    "global_seed_config"
+                )
 
         if trajopt_result is not None:
             if posture_seeds is not None:

@@ -1,0 +1,450 @@
+{
+  "schema": "arm-detour-regression-v1",
+  "recorded_date": "2026-10-23",
+  "native_repository": "https://github.com/FastSim-Benchmark/curobo",
+  "native_commit": "30dd1194b799498699a8cf4aa8b0d5412a777d15",
+  "baseline_run": "arm_detour_baseline_20261023_r01",
+  "robot_asset": "G2_0915/G2/g2_crsb_op3_e",
+  "native_tool_frames": [
+    "left_gripper_center",
+    "right_gripper_center"
+  ],
+  "seed": 5,
+  "ik_seed_count": 32,
+  "trajopt_seed_count": 4,
+  "world": "empty",
+  "self_collision_check": true,
+  "velocity_limit_rad_s": 0.4,
+  "case_ids": [
+    "both_nearby_2",
+    "both_roll_positive",
+    "right_restore_2"
+  ],
+  "cases": [
+    {
+      "id": "both_nearby_2",
+      "group": "both",
+      "side": "right",
+      "label": "双臂同时不同起始姿态附近小幅动作2",
+      "joint_names": [
+        "idx21_arm_l_joint1",
+        "idx22_arm_l_joint2",
+        "idx23_arm_l_joint3",
+        "idx24_arm_l_joint4",
+        "idx25_arm_l_joint5",
+        "idx26_arm_l_joint6",
+        "idx27_arm_l_joint7",
+        "idx61_arm_r_joint1",
+        "idx62_arm_r_joint2",
+        "idx63_arm_r_joint3",
+        "idx64_arm_r_joint4",
+        "idx65_arm_r_joint5",
+        "idx66_arm_r_joint6",
+        "idx67_arm_r_joint7"
+      ],
+      "tool_frames": [
+        "left_gripper_center",
+        "right_gripper_center"
+      ],
+      "start": [
+        1.2242965093715894,
+        -1.234161652968981,
+        -1.4294413671793116,
+        -1.9663529175073935,
+        3.071799,
+        -0.3660021803436657,
+        0.13369923040058482,
+        -1.474419560685471,
+        -0.831571647553231,
+        1.6224476081920765,
+        -1.5029968071143172,
+        -2.5074072979953206,
+        -0.10818766636734126,
+        -0.4730606393683102
+      ],
+      "joint_goal_witness": [
+        1.2756570424767475,
+        -1.2260941639683733,
+        -1.3674308515166262,
+        -1.921827716650522,
+        3.0551358230505423,
+        -0.43474538750772845,
+        0.10354792110406877,
+        -1.4027338386172783,
+        -0.7774544854911521,
+        1.6160294782854148,
+        -1.5430572490869796,
+        -2.4965296157334733,
+        -0.06328873921610889,
+        -0.47264328429767616
+      ],
+      "goal_pose_base": [
+        [
+          0.917404737473212,
+          -0.38303455646568413,
+          -0.10794941507411455,
+          0.6638162125678034
+        ],
+        [
+          0.3956385131551358,
+          0.9070953077267804,
+          0.1436950577036356,
+          -0.39936485238099756
+        ],
+        [
+          0.04288023519175685,
+          -0.17453547276469145,
+          0.9837167550553896,
+          1.167747557027295
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "tool_goal_poses": {
+        "left_gripper_center": [
+          [
+            0.9515625840908778,
+            0.24690314925650791,
+            -0.18321431015482686,
+            0.6801213147152185
+          ],
+          [
+            -0.291219857634264,
+            0.914887488462611,
+            -0.2795923424810739,
+            0.19869418851901705
+          ],
+          [
+            0.09858825020137806,
+            0.319405257223161,
+            0.9424758026498274,
+            1.2057941806244081
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "right_gripper_center": [
+          [
+            0.917404737473212,
+            -0.38303455646568413,
+            -0.10794941507411455,
+            0.6638162125678034
+          ],
+          [
+            0.3956385131551358,
+            0.9070953077267804,
+            0.1436950577036356,
+            -0.39936485238099756
+          ],
+          [
+            0.04288023519175685,
+            -0.17453547276469145,
+            0.9837167550553896,
+            1.167747557027295
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      },
+      "local_endpoint_ik_precise": true,
+      "start_clearance_m": 0.005101672896421602,
+      "primary_tool": "right_gripper_center"
+    },
+    {
+      "id": "both_roll_positive",
+      "group": "both",
+      "side": "right",
+      "label": "双臂同时TCP原地正向翻腕90度",
+      "joint_names": [
+        "idx21_arm_l_joint1",
+        "idx22_arm_l_joint2",
+        "idx23_arm_l_joint3",
+        "idx24_arm_l_joint4",
+        "idx25_arm_l_joint5",
+        "idx26_arm_l_joint6",
+        "idx27_arm_l_joint7",
+        "idx61_arm_r_joint1",
+        "idx62_arm_r_joint2",
+        "idx63_arm_r_joint3",
+        "idx64_arm_r_joint4",
+        "idx65_arm_r_joint5",
+        "idx66_arm_r_joint6",
+        "idx67_arm_r_joint7"
+      ],
+      "tool_frames": [
+        "left_gripper_center",
+        "right_gripper_center"
+      ],
+      "start": [
+        1.8652406834212543,
+        -1.3446016860560523,
+        -1.5336720557127748,
+        -2.0853780088487066,
+        2.9321736598404313,
+        -0.20095478424065755,
+        -0.1453020172095987,
+        -1.8652430415747527,
+        -1.3445868469727493,
+        1.5336514473436358,
+        -2.085378008788019,
+        -2.9321736598404313,
+        -0.20094755378137755,
+        0.14531460098567148
+      ],
+      "joint_goal_witness": [
+        0.5940473014482563,
+        -0.6075423210256975,
+        0.46826882508777584,
+        -2.085377924694973,
+        2.6346952987951884,
+        -1.0113135645647862,
+        -1.4275336074494909,
+        -1.86129865808305,
+        -1.5013565119513135,
+        1.6577539169899158,
+        -2.085378004891089,
+        -1.467483740485624,
+        -0.0412820069555337,
+        0.22923638778390235
+      ],
+      "goal_pose_base": [
+        [
+          0.9999999999998921,
+          7.573216814771289e-08,
+          4.5862070499186936e-07,
+          0.5500000484672695
+        ],
+        [
+          4.5862079850775787e-07,
+          -1.2341642097022965e-06,
+          -0.9999999999991332,
+          -0.28000009765094747
+        ],
+        [
+          -7.573160215601507e-08,
+          0.9999999999992355,
+          -1.2341642444267639e-06,
+          1.074177992411774
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "tool_goal_poses": {
+        "left_gripper_center": [
+          [
+            0.9999999999998919,
+            7.570469628959142e-08,
+            -4.5818214942318995e-07,
+            0.5500000484619884
+          ],
+          [
+            -4.5818224283760957e-07,
+            1.234126003652975e-06,
+            -0.9999999999991332,
+            0.28000009764521955
+          ],
+          [
+            -7.57041308530049e-08,
+            0.9999999999992354,
+            1.2341260383691151e-06,
+            1.0741779924109747
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "right_gripper_center": [
+          [
+            0.9999999999998921,
+            7.573216814771289e-08,
+            4.5862070499186936e-07,
+            0.5500000484672695
+          ],
+          [
+            4.5862079850775787e-07,
+            -1.2341642097022965e-06,
+            -0.9999999999991332,
+            -0.28000009765094747
+          ],
+          [
+            -7.573160215601507e-08,
+            0.9999999999992355,
+            -1.2341642444267639e-06,
+            1.074177992411774
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      },
+      "local_endpoint_ik_precise": true,
+      "start_clearance_m": 0.005101672896421546,
+      "primary_tool": "right_gripper_center"
+    },
+    {
+      "id": "right_restore_2",
+      "group": "right",
+      "side": "right",
+      "label": "右臂从不同姿态回到默认位姿2",
+      "joint_names": [
+        "idx61_arm_r_joint1",
+        "idx62_arm_r_joint2",
+        "idx63_arm_r_joint3",
+        "idx64_arm_r_joint4",
+        "idx65_arm_r_joint5",
+        "idx66_arm_r_joint6",
+        "idx67_arm_r_joint7"
+      ],
+      "tool_frames": [
+        "right_gripper_center"
+      ],
+      "start": [
+        -1.5298729145461127,
+        -1.5999990000000002,
+        2.126292366374593,
+        -2.1706343997819917,
+        -3.071799,
+        -0.6314000489004333,
+        0.03973572664777633
+      ],
+      "joint_goal_witness": [
+        -1.8652430415747527,
+        -1.3445868469727493,
+        1.5336514473436358,
+        -2.085378008788019,
+        -2.9321736598404313,
+        -0.20094755378137755,
+        0.14531460098567148
+      ],
+      "goal_pose_base": [
+        [
+          0.9999999999998921,
+          -4.5862070499186936e-07,
+          7.5732168147713e-08,
+          0.5500000484672695
+        ],
+        [
+          4.5862079850775787e-07,
+          0.9999999999991332,
+          -1.234164209924341e-06,
+          -0.28000009765094747
+        ],
+        [
+          -7.573160215601507e-08,
+          1.2341642446488085e-06,
+          0.9999999999992355,
+          1.074177992411774
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "tool_goal_poses": {
+        "right_gripper_center": [
+          [
+            0.9999999999998921,
+            -4.5862070499186936e-07,
+            7.5732168147713e-08,
+            0.5500000484672695
+          ],
+          [
+            4.5862079850775787e-07,
+            0.9999999999991332,
+            -1.234164209924341e-06,
+            -0.28000009765094747
+          ],
+          [
+            -7.573160215601507e-08,
+            1.2341642446488085e-06,
+            0.9999999999992355,
+            1.074177992411774
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      },
+      "local_endpoint_ik_precise": true,
+      "start_clearance_m": 0.005101672896421234,
+      "primary_tool": "right_gripper_center"
+    }
+  ],
+  "sequence": {
+    "both": [
+      "both_retract",
+      "both_extend",
+      "both_outward",
+      "both_inward",
+      "both_raise",
+      "both_lower",
+      "both_diagonal_up",
+      "both_diagonal_down",
+      "both_roll_positive",
+      "both_roll_negative",
+      "both_pitch",
+      "both_yaw",
+      "both_nearby_1",
+      "both_restore_1",
+      "both_nearby_2",
+      "both_restore_2"
+    ],
+    "right": [
+      "right_retract",
+      "right_extend",
+      "right_outward",
+      "right_inward",
+      "right_raise",
+      "right_lower",
+      "right_diagonal_up",
+      "right_diagonal_down",
+      "right_roll_positive",
+      "right_roll_negative",
+      "right_pitch",
+      "right_yaw",
+      "right_nearby_1",
+      "right_restore_1",
+      "right_nearby_2",
+      "right_restore_2"
+    ]
+  },
+  "modes_per_case": [
+    "pose",
+    "joints",
+    "same_endpoint"
+  ],
+  "case_start_reset": true,
+  "notes": [
+    "The same planner is reused inside each group. Random seed sets the initial sampler state, not the per-request sample batch.",
+    "A fresh isolated request may hide a regression. Keep both the full-sequence and isolated checks.",
+    "Joint witnesses are controls only; improvement policies must not consume these witness angles.",
+    "Preserve native limits, all collision spheres and both tool targets; do not equate short TCP paths with full naturalness."
+  ]
+}

@@ -99,6 +99,12 @@ class SeedIKSolver:
         # Joint limits
         self.action_min = self.joint_limits.position[0] + joint_limit_margin
         self.action_max = self.joint_limits.position[1] - joint_limit_margin
+        self._local_seed_active = False
+        self.global_seed_config: Optional[torch.Tensor] = None
+        local_count = min(config.local_seed_count, config.num_seeds)
+        rows = torch.arange(local_count, **self.device_cfg.as_torch_dict())[:, None]
+        columns = torch.arange(1, self.dof + 1, **self.device_cfg.as_torch_dict())[None]
+        self._local_offsets = config.local_seed_radius * torch.sin(rows * columns * 2.39996323)
 
         self.action_step_max = self.config.max_step_size * torch.abs(
             self.action_max - self.action_min
@@ -482,6 +488,8 @@ class SeedIKSolver:
         Returns:
             Tensor of shape (batch_size, num_seeds, dof)
         """
+        self._local_seed_active = False
+        self.global_seed_config = None
         if seed_config is not None:
             if seed_config.ndim != 3:
                 log_and_raise(
@@ -505,6 +513,12 @@ class SeedIKSolver:
                 ).view(batch_size, self.config.num_seeds - seed_config.shape[1], self.dof)
 
                 seeds = torch.cat([seed_config, extra_seeds], dim=1)
+                if seed_config.shape[1] == 1 and self._local_offsets.shape[0] > 0:
+                    self.global_seed_config = seeds.clone()
+                    count = self._local_offsets.shape[0]
+                    local = seed_config + self._local_offsets[None]
+                    seeds[:, :count] = torch.clamp(local, min=self.action_min, max=self.action_max)
+                    self._local_seed_active = True
             else:
                 seeds = seed_config
         else:
@@ -560,6 +574,15 @@ class SeedIKSolver:
         # Select top solutions
         _, top_indices = stable_topk(costs, k=return_seeds, largest=False)
         top_indices = top_indices.view(batch_size, return_seeds)
+        if self._local_seed_active:
+            count = min(self._local_offsets.shape[0], return_seeds // 2)
+            if count:
+                # Keep local candidates even if they still need main-IK refinement.
+                global_cost = costs.clone()
+                global_cost[:, :count] = torch.inf
+                _, global_indices = stable_topk(global_cost, k=return_seeds-count, largest=False)
+                local_indices = torch.arange(count, device=solutions.device).expand(batch_size, -1)
+                top_indices = torch.cat([local_indices, global_indices], dim=1)
 
         # Convert to flat indices for advanced indexing
         top_indices = self._batch_indices.unsqueeze(-1) + top_indices.unsqueeze(0)

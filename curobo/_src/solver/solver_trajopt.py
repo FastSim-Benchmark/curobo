@@ -33,6 +33,7 @@ from curobo._src.solver.trajopt_diagnostics import joint_bound_diagnostics
 from curobo._src.state.state_joint import JointState
 from curobo._src.types.control_space import ControlSpace
 from curobo._src.types.tool_pose import GoalToolPose, ToolPose
+from curobo._src.solver.solver_motion_quality import motion_quality_cost
 from curobo._src.util.cuda_event_timer import CudaEventTimer
 from curobo._src.util.interpolation_roundoff import project_interpolation_position_roundoff
 from curobo._src.util.logging import log_and_raise, log_warn
@@ -543,6 +544,24 @@ class TrajOptSolver:
         all_seeds_result: TrajOptSolverResult,
         return_seeds: int,
     ) -> TrajOptSolverResult:
+        if self.config.prefer_smooth_motion:
+            state = all_seeds_result.metrics.state
+            batch, seeds = all_seeds_result.batch_size, all_seeds_result.num_seeds
+            joints = state.joint_state.position.reshape(batch, seeds, -1, self.action_dim)
+            positions = state.cuda_robot_model_state.tool_poses.position.reshape(
+                batch, seeds, joints.shape[2], -1, 3
+            )
+            rotations = state.cuda_robot_model_state.tool_poses.quaternion.reshape(
+                batch, seeds, joints.shape[2], -1, 4
+            )
+            quality = motion_quality_cost(positions, joints, rotations)
+            order = torch.argsort(quality, dim=1, stable=True)
+            valid = torch.gather(all_seeds_result.success, 1, order)
+            feasible_order = torch.argsort(
+                valid.to(torch.int32), dim=1, descending=True, stable=True
+            )
+            all_seeds_result.seed_rank = torch.gather(order, 1, feasible_order)
+            all_seeds_result.debug_info["motion_quality_cost"] = quality
         best_trajopt_result = all_seeds_result.get_topk_seeds(return_seeds)
         best_solution = best_trajopt_result.js_solution
         if best_solution.joint_names is None:

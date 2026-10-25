@@ -83,6 +83,8 @@ class MotionPlannerCfg:
         interpolation_dt: float = 0.025,
         interpolation_buffer_size: int = 1000,
         trajopt_finetune_attempts: Optional[int] = None,
+        prefer_smooth_motion: bool = False,
+        quality_refinement_iters: int = 20,
     ) -> MotionPlannerCfg:
         """Create a MotionPlannerCfg from robot, task, and scene configs.
 
@@ -182,12 +184,27 @@ class MotionPlannerCfg:
                 branch's existing default. Zero runs only the initial solve,
                 including retiming and complete trajectory validation; the
                 resulting motion may take longer to execute.
+            prefer_smooth_motion: Prefer low-detour motions using local IK
+                guesses, bounded refinement, retained endpoint alternatives,
+                and per-tool trajectory ranking. Native feasibility checks
+                and global retries remain enabled. Opt in after validating
+                the robot and task distribution.
+            quality_refinement_iters: Maximum improvement steps when an IK
+                batch already has a feasible endpoint. Rounded down to an
+                optimizer block, with at least one block executed. Batches
+                without feasible endpoints keep the original solver budget.
 
         Returns:
             MotionPlannerCfg containing IK, TrajOpt, graph planner, and
             optional scene collision configuration.
         """
         _validate_trajopt_finetune_attempts(trajopt_finetune_attempts)
+        if (
+            isinstance(quality_refinement_iters, bool)
+            or not isinstance(quality_refinement_iters, int)
+            or quality_refinement_iters <= 0
+        ):
+            log_and_raise("quality_refinement_iters must be a positive integer")
         if num_ik_seeds is None:
             num_ik_seeds = 16 if max_batch_size > 1 else 32
         if num_trajopt_seeds is None:
@@ -284,6 +301,9 @@ class MotionPlannerCfg:
             use_cuda_graph_for_rollout=use_cuda_graph,
         )
 
+        ik_solver_config.prefer_smooth_motion = prefer_smooth_motion
+        ik_solver_config.quality_refinement_iters = quality_refinement_iters
+        trajopt_solver_config.prefer_smooth_motion = prefer_smooth_motion
         return MotionPlannerCfg(
             ik_solver_config=ik_solver_config,
             trajopt_solver_config=trajopt_solver_config,

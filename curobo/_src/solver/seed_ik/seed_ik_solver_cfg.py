@@ -79,6 +79,10 @@ class SeedIKSolverCfg:
     )  # allow to solve up to 1000 problems in a single mini batch
 
     start_cspace_dist_weight: float = 0.01
+    #: Deterministic near-start initial guesses retained through LM filtering.
+    local_seed_count: int = 0
+    #: Maximum per-joint offset (radians) of the deterministic local guesses.
+    local_seed_radius: float = 0.2
 
     position_weight: float = 1.0
     """Weight for position error in the pose cost."""

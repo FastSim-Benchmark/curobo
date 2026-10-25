@@ -165,3 +165,10 @@ docker/pkgs/*
 *.svg
 *.SVG
 !docs/images/*.svg
+
+# Independent planner research: local evidence, assets and runtime
+/runs/
+/.runtime/
+/research/evidence/
+/research/assets/
+/research/archive/

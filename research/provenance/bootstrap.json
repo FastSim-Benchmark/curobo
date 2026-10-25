@@ -1,0 +1,17 @@
+{
+  "created": "2026-10-23",
+  "project": "/home/ubuntu/desktop/fastsim-planner-research",
+  "source_checkout": "/home/ubuntu/desktop/fastsim_benchmark_project_20260902/curobo",
+  "native_commit": "30dd1194b799498699a8cf4aa8b0d5412a777d15",
+  "source_repository": "https://github.com/FastSim-Benchmark/curobo",
+  "branch": "codex/planner-natural-motion",
+  "clone_mode": "independent --no-hardlinks; no alternates; no upstream fetch",
+  "old_preparation_project": "/home/ubuntu/desktop/jd_fastsim-task-preparation",
+  "evidence_original": "/home/ubuntu/desktop/jd_fastsim-task-preparation/task-yaml-harness/runs/planner_gpt_review_package_20261023_r01/FastSim_Planner_GPT_Review_20261023",
+  "evidence_local": "research/evidence/gpt-review-20261023",
+  "assets_original": "/home/ubuntu/desktop/G2_0915/G2/g2_crsb_op3_e",
+  "assets_local": "research/assets/g2_crsb_op3_e",
+  "asset_file_count": 89,
+  "omitted_assets": "Original robot USD/physics assets not copied; URDF, meshes and configs copied for native planning and FK rendering.",
+  "working_changes_committed": false
+}
