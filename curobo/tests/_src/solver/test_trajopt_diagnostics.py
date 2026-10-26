@@ -108,6 +108,7 @@ def test_solver_result_adds_diagnostics_only_for_failure(success, caplog):
         get_cost=lambda name: SimpleNamespace(config=config),
     )
     solver = SimpleNamespace(
+        config=SimpleNamespace(prefer_smooth_motion=False),
         joint_names=config.joint_limits.joint_names,
         metrics_rollout=SimpleNamespace(metrics_constraint_manager=manager),
         auxiliary_rollout=SimpleNamespace(

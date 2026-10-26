@@ -33,7 +33,12 @@ from curobo._src.solver.trajopt_diagnostics import joint_bound_diagnostics
 from curobo._src.state.state_joint import JointState
 from curobo._src.types.control_space import ControlSpace
 from curobo._src.types.tool_pose import GoalToolPose, ToolPose
-from curobo._src.solver.solver_motion_quality import motion_quality_cost
+from curobo._src.solver.solver_motion_quality import (
+    create_motion_quality_kinematics,
+    motion_quality_cost,
+    posture_motion_penalty,
+    rank_balanced_motion_candidates,
+)
 from curobo._src.util.cuda_event_timer import CudaEventTimer
 from curobo._src.util.interpolation_roundoff import project_interpolation_position_roundoff
 from curobo._src.util.logging import log_and_raise, log_warn
@@ -74,6 +79,11 @@ class TrajOptSolver:
         """Initializes the TrajOpt solver."""
         self.config = config
         self.core = SolverCore(config.core_cfg, scene_collision_checker)
+        self._quality_kinematics = (
+            create_motion_quality_kinematics(config.robot_config.kinematics)
+            if config.prefer_smooth_motion and getattr(config, "_posture_motion_enabled", True)
+            else None
+        )
 
         # TrajOpt needs an additional interpolated rollout
         rollout_instance = RobotRollout(
@@ -487,17 +497,37 @@ class TrajOptSolver:
             if i == 0 and torch.count_nonzero(best_trajopt_result.success) == 0:
                 break
 
-        if not bool(best_trajopt_result.success.any()):
+        optimized_success = bool(best_trajopt_result.success.any())
+        partial_recovery = False
+        if (optimized_success and self._quality_kinematics is not None
+                and not bool(best_trajopt_result.success.all())):
+            batch = best_trajopt_result.batch_size
+            state = best_trajopt_result.metrics.state
+            joints = state.joint_state.position.reshape(batch, num_seeds, -1, self.action_dim)
+            positions = state.cuda_robot_model_state.tool_poses.position.reshape(
+                batch, num_seeds, joints.shape[2], -1, 3)
+            rotations = state.cuda_robot_model_state.tool_poses.quaternion.reshape(
+                batch, num_seeds, joints.shape[2], -1, 4)
+            quality = motion_quality_cost(positions, joints, rotations)
+            partial_recovery = bool((torch.where(best_trajopt_result.success,
+                quality, torch.inf).amin(dim=1) > 4.).any())
+        if not optimized_success or partial_recovery:
             recovered = self._validate_retimed_initial_seed(
                 initial_action_seed, num_seeds, goal_buffer,
             )
+            if optimized_success:
+                recovered.success &= ~best_trajopt_result.success
             seed_success = bool(recovered.success.any())
             recovery = {
-                "optimized_candidate_success": False,
+                "optimized_candidate_success": optimized_success,
                 "retimed_seed_success": seed_success,
+                "partial_quality_recovery": partial_recovery,
             }
             if seed_success:
-                best_trajopt_result = recovered
+                if optimized_success:
+                    best_trajopt_result.copy_successful_solutions(recovered)
+                else:
+                    best_trajopt_result = recovered
             else:
                 recovery["seed_constraint_maxima"] = (
                     recovered.get_topk_seeds(1).debug_info or {}
@@ -555,6 +585,18 @@ class TrajOptSolver:
                 batch, seeds, joints.shape[2], -1, 4
             )
             quality = motion_quality_cost(positions, joints, rotations)
+            posture_height = None
+            tcp_baseline_quality = quality
+            quality_kinematics = getattr(self, "_quality_kinematics", None)
+            if (quality_kinematics is not None
+                    and len(quality_kinematics.tool_frames) > positions.shape[-2]):
+                dense_js = all_seeds_result.interpolated_metrics.state.joint_state
+                posture = quality_kinematics.compute_kinematics(dense_js).tool_poses.position
+                posture = posture.reshape(batch, seeds, -1,
+                    len(quality_kinematics.tool_frames), 3)
+                posture_height = posture[..., positions.shape[-2]:, 2]
+                quality = quality + posture_motion_penalty(
+                    posture_height, all_seeds_result.interpolated_last_tstep)
             order = torch.argsort(quality, dim=1, stable=True)
             valid = torch.gather(all_seeds_result.success, 1, order)
             feasible_order = torch.argsort(
@@ -562,6 +604,18 @@ class TrajOptSolver:
             )
             all_seeds_result.seed_rank = torch.gather(order, 1, feasible_order)
             all_seeds_result.debug_info["motion_quality_cost"] = quality
+            if getattr(self, "_balanced_motion_enabled", True):
+                dense = all_seeds_result.interpolated_metrics.state
+                dense_positions = dense.cuda_robot_model_state.tool_poses.position
+                dense_positions = dense_positions.reshape(batch, seeds, -1,
+                                                           positions.shape[-2], 3)
+                rank, balance = rank_balanced_motion_candidates(
+                    dense_positions, all_seeds_result.interpolated_last_tstep,
+                    all_seeds_result.success, quality, posture_height,
+                    tcp_baseline_quality if posture_height is not None else None,
+                )
+                all_seeds_result.seed_rank = rank
+                all_seeds_result.debug_info["motion_quality_balance"] = balance
         best_trajopt_result = all_seeds_result.get_topk_seeds(return_seeds)
         best_solution = best_trajopt_result.js_solution
         if best_solution.joint_names is None:

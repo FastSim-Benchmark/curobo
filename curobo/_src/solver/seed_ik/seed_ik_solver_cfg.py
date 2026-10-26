@@ -84,6 +84,11 @@ class SeedIKSolverCfg:
     #: Maximum per-joint offset (radians) of the deterministic local guesses.
     local_seed_radius: float = 0.2
 
+    #: Soft midpoint TCP deviation weight; zero preserves ordinary endpoint-only LM.
+    path_regularization_weight: float = 0.0
+    #: Prefix of candidate seeds eligible for the soft path cost; the rest stay global.
+    path_regularization_seeds: int = 0
+
     position_weight: float = 1.0
     """Weight for position error in the pose cost."""
 
@@ -139,6 +144,8 @@ class SeedIKSolverCfg:
         return SeedIKSolverCfg(**config_dict)
 
     def __post_init__(self):
+        if self.path_regularization_weight < 0 or self.path_regularization_seeds < 0:
+            log_and_raise("Path regularization weight and seed count must be nonnegative")
         if self.max_iterations < self.inner_iterations:
             log_and_raise(
                 "max_iterations: {} must be greater than inner_iterations: {}".format(

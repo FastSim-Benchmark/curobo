@@ -35,8 +35,11 @@ from curobo._src.solver.solver_ik_cfg import IKSolverCfg
 from curobo._src.solver.solver_ik_result import IKSolverResult
 from curobo._src.solver.solver_motion_quality import (
     combine_independent_tool_candidates,
+    create_motion_quality_kinematics,
+    height_overshoot,
     motion_quality_cost,
     motion_quality_terms,
+    posture_motion_penalty,
     select_motion_candidates,
 )
 from curobo._src.state.state_joint import JointState
@@ -112,8 +115,11 @@ class IKSolver:
         """Initializes the IK solver."""
         self.config = config
         self.core = SolverCore(config.core_cfg, scene_collision_checker)
+        self._posture_motion_enabled = getattr(config, "_posture_motion_enabled", True)
         self._quality_kinematics = (
-            Kinematics(config.robot_config.kinematics, compute_spheres=False)
+            (create_motion_quality_kinematics(config.robot_config.kinematics)
+             if self._posture_motion_enabled else
+             Kinematics(config.robot_config.kinematics, compute_spheres=False))
             if config.prefer_smooth_motion else None
         )
         self._independent_tool_joints = None
@@ -142,6 +148,8 @@ class IKSolver:
                         max_iterations=40, inner_iterations=20,
                         use_cuda_graph=config.use_cuda_graph, device_cfg=config.device_cfg,
                         joint_limit_weight=1.0, lambda_initial=1.0,
+                        path_regularization_weight=0.05,
+                        path_regularization_seeds=config.num_seeds,
                     )))
         rows = torch.arange(config.num_seeds, **config.device_cfg.as_torch_dict())[:, None]
         columns = torch.arange(1, self.action_dim + 1, **config.device_cfg.as_torch_dict())[None]
@@ -203,6 +211,8 @@ class IKSolver:
                     orientation_weight=self.config.seed_orientation_weight,
                     velocity_weight=self.config.seed_velocity_weight,
                     acceleration_weight=self.config.seed_acceleration_weight,
+                    path_regularization_weight=(0.05 if config.prefer_smooth_motion else 0.0),
+                    path_regularization_seeds=min(8, self.config.num_seeds // 2),
                     local_seed_count=(
                         min(8, self.config.num_seeds // 2) if config.prefer_smooth_motion else 0
                     ),
@@ -476,7 +486,7 @@ class IKSolver:
 
     def _endpoint_motion_cost(
         self, actions: torch.Tensor, current_state: JointState
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """Evaluate nine-point joint-interpolation drafts [batch, seeds, dof]."""
         batch, seeds, dof = actions.shape
         start = self.get_active_js(current_state).position.view(batch, 1, 1, dof)
@@ -487,10 +497,22 @@ class IKSolver:
                 path.reshape(batch * seeds, 9, dof), joint_names=self.joint_names
             )
         )
-        tools = state.tool_poses.position.view(batch, seeds, 9, -1, 3)
-        rotations = state.tool_poses.quaternion.view(batch, seeds, 9, -1, 4)
+        positions = state.tool_poses.position.view(batch, seeds, 9, -1, 3)
+        count = len(self.tool_frames)
+        tools = positions[..., :count, :]
+        rotations = state.tool_poses.quaternion.view(batch, seeds, 9, -1, 4)[..., :count, :]
         per_tool = motion_quality_terms(tools, rotations)
-        return motion_quality_cost(tools, path, rotations), per_tool
+        cost = motion_quality_cost(tools, path, rotations)
+        large_motion = None
+        if self._posture_motion_enabled:
+            travel = torch.linalg.vector_norm(tools.diff(dim=2), dim=-1).sum(dim=2)
+            chord = torch.linalg.vector_norm(tools[:, :, -1] - tools[:, :, 0], dim=-1)
+            large_motion = ((travel > .5) & (travel - chord > .25)).any(dim=-1)
+        if positions.shape[-2] > count:
+            heights = positions[..., count:, 2]
+            cost = cost + posture_motion_penalty(heights)
+            per_tool = per_tool + 4. * (height_overshoot(heights) - .05).clamp_min(0.) / .05
+        return cost, per_tool, large_motion
 
     def _solve_motion_quality(
         self,
@@ -509,7 +531,7 @@ class IKSolver:
         old_actions = old.solution.clone()
         old_success = old.success.clone()
         tool_success = old.debug_info["tool_success"].clone()
-        old_cost, old_tool_cost = self._endpoint_motion_cost(old_actions, current_state)
+        old_cost, old_tool_cost, old_large = self._endpoint_motion_cost(old_actions, current_state)
         best = select_motion_candidates(old_actions, old_success, old_cost, 1)
         best_cost = torch.gather(old_cost, 1, best).squeeze(1)
         good = old_success.any(dim=1) & (best_cost <= 0.15)
@@ -521,6 +543,11 @@ class IKSolver:
             stages = [(stage, stage.config.num_iters) for stage in self.optimizer.optimizers]
             # No feasible endpoint: retain the original global optimizer budget.
             short = bool(old_success.any(dim=1).all())
+            # A large draft detour or elbow rise merits the existing full IK
+            # budget. Normal drafts retain bounded refinement and seed count.
+            if self._posture_motion_enabled:
+                large_best = torch.gather(old_large, 1, best).squeeze(1)
+                short = short and not bool((large_best & (best_cost > 4.)).any())
             opt_timer = CudaEventTimer().start()
             try:
                 if short:
@@ -539,7 +566,7 @@ class IKSolver:
             metrics = self.metrics_rollout.compute_metrics_from_action(optimized)
             new = self._get_result(optimized, metrics, num_seeds, num_seeds)
             new_actions = new.solution.clone()
-            new_cost, new_tool_cost = self._endpoint_motion_cost(new_actions, current_state)
+            new_cost, new_tool_cost, _ = self._endpoint_motion_cost(new_actions, current_state)
             actions = torch.cat([old_actions, new_actions], dim=1)
             successful = torch.cat([old_success, new.success], dim=1)
             tool_success = torch.cat([tool_success, new.debug_info["tool_success"]], dim=1)
@@ -563,7 +590,7 @@ class IKSolver:
                     local = solver.solve_batch(local_goal, current_state=active_start,
                         seed_config=local_seed, return_seeds=solver.config.num_seeds)
                     local_actions = local.solution.clone()
-                    local_cost, local_tool_cost = self._endpoint_motion_cost(
+                    local_cost, local_tool_cost, _ = self._endpoint_motion_cost(
                         local_actions, current_state
                     )
                     converged = torch.zeros(
@@ -583,7 +610,7 @@ class IKSolver:
             metrics = self.metrics_rollout.compute_metrics_from_action(combined_actions)
             combined_result = self._get_result(combined_actions, metrics, num_seeds, num_seeds)
             combined = combined_result.solution.clone()
-            combined_cost, _ = self._endpoint_motion_cost(combined, current_state)
+            combined_cost, _, _ = self._endpoint_motion_cost(combined, current_state)
             actions = torch.cat([actions, combined], dim=1)
             successful = torch.cat([successful, combined_result.success], dim=1)
             costs = torch.cat([costs, combined_cost], dim=1)
@@ -603,6 +630,9 @@ class IKSolver:
         result = self._get_result(final_actions, metrics, num_seeds, return_seeds, selection)
         result.debug_info["motion_quality"] = {
             "refined": refined, "proxy_cost": torch.gather(costs, 1, indices),
+            "extended_quality_refinement": (refined and self._posture_motion_enabled
+                                             and bool(old_success.any(dim=1).all())
+                                             and not short),
         }
         self._compute_solution_velocity(result, current_state, return_seeds)
         result.total_time = total_timer.stop()
@@ -932,6 +962,16 @@ class IKSolver:
 
         if seed_config is None and current_state is not None:
             seed_config = current_state.position.clone().view(batch_size, 1, -1)
+
+        # Straight-chord preferences do not model obstacle homotopy. Keep the
+        # original endpoint objective whenever any scene has registered geometry.
+        checker = self.scene_collision_checker
+        path_cost_enabled = checker is None or not any(
+            checker.get_obstacle_names(env) for env in range(checker.num_envs)
+        )
+        for seed_solver in [self.seed_ik_solver, *self._local_tool_solvers]:
+            if seed_solver is not None:
+                seed_solver._path_cost_enabled = path_cost_enabled
 
         if self.config.use_lm_seed and run_optimizer:
             if batch_size == 1:

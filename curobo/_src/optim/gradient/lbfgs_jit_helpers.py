@@ -41,7 +41,9 @@ def jit_lbfgs_compute_step_direction(
     for i in range(m):
         # batched dot product, scalar-vector product
         r = r + (alpha_buffer[i] - (rho_y[i] @ r)) * s_buffer[i]
-    return -1.0 * r
+    descent = (grad_q * r).sum(dim=-2, keepdim=True)
+    usable = torch.isfinite(descent) & (descent > 0.0)
+    return -torch.where(usable, r, epsilon * grad_q)
 
 
 
@@ -61,7 +63,15 @@ def jit_lbfgs_update_buffers(
 
     y = grad_q - grad_0
     s = q - x_0
-    rho = 1 / (y.transpose(-1, -2) @ s)
+    curvature = y.transpose(-1, -2) @ s
+    norm_product = torch.sqrt(y.square().sum(dim=-2, keepdim=True)
+                              * s.square().sum(dim=-2, keepdim=True))
+    valid = torch.isfinite(curvature) & torch.isfinite(norm_product)
+    valid = valid & (curvature > 1e-7 * norm_product)
+    # Invalid pairs are empty history slots, so they cannot corrupt either loop.
+    y = torch.where(valid, y, 0.0)
+    s = torch.where(valid, s, 0.0)
+    rho = torch.where(valid, 1.0 / curvature, 0.0)
     if stable_mode:
         rho = torch.nan_to_num(rho, 0.0, 0.0, 0.0)
     s_buffer[0] = s

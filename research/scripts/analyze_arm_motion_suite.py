@@ -58,6 +58,9 @@ def main(run: Path) -> None:
                 else:
                     deviation = np.linalg.norm(tcp-tcp[0], axis=1)
                 angular_length = float(Rotation.from_matrix(np.einsum("nji,njk->nik", rotation[:-1], rotation[1:])).magnitude().sum())
+                side = 'l' if tool.startswith('left') else 'r'
+                arm_indices = [i for i,n in enumerate(case['joint_names']) if f'_arm_{side}_' in n]
+                arm_difference = difference[:, arm_indices]
                 tool_metrics[tool] = {
                     "tcp_path_m": length, "tcp_chord_m": tcp_chord,
                     "tcp_path_ratio": length/tcp_chord if tcp_chord > .01 else None,
@@ -71,6 +74,8 @@ def main(run: Path) -> None:
                     "tcp_max_start_offset_m": float(np.linalg.norm(tcp-tcp[0], axis=1).max()),
                     "requested_translation_m": float(np.linalg.norm(goal[:3, 3]-tcp[0])),
                     "requested_rotation_rad": float(Rotation.from_matrix(rotation[0].T @ goal[:3, :3]).magnitude()),
+                    "joint_path_rad": float(np.linalg.norm(arm_difference, axis=1).sum()),
+                    "joint_backtrack_rad": float(backtrack[arm_indices].max()) if arm_indices else 0.0,
                 }
                 fk_arrays[tool+"_tcp"] = tcp; fk_arrays[tool+"_elbow"] = elbow
             np.savez_compressed(path.parent / "suite-fk.npz", **fk_arrays)

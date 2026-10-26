@@ -18,6 +18,7 @@ import torch
 import torch.autograd.profiler as profiler
 
 # CuRobo
+from curobo._src.solver.seed_ik.seed_path_regularizer import SeedPathRegularizer
 from curobo._src.cost.cost_tool_pose import ToolPoseCost
 from curobo._src.state.state_joint import JointState
 from curobo._src.cost.cost_tool_pose_cfg import (
@@ -59,6 +60,11 @@ class SeedIKErrorCalculator:
         self.velocity_limits = robot_model.get_joint_limits().velocity
         self.num_links = len(robot_model.tool_frames)
         self.dof = robot_model.get_dof()
+        self.path_regularizer = (
+            SeedPathRegularizer(config.robot_config.kinematics, config.path_regularization_weight,
+                                config.path_regularization_seeds, device_cfg)
+            if config.path_regularization_weight > 0 else None
+        )
         self._batch_size = -1
         self._num_seeds = -1
         self._num_problems = -1
@@ -99,6 +105,9 @@ class SeedIKErrorCalculator:
                 device=self.device_cfg.device,
             )
             self.pose_cost.setup_batch_tensors(self._num_problems, 1)
+            if self.path_regularizer is not None:
+                self.path_regularizer.setup_batch_tensors(batch_size, num_seeds)
+
 
 
     def _setup_cost_function(self):
@@ -219,6 +228,14 @@ class SeedIKErrorCalculator:
             accel_jacobian,
             accel_error_norm,
         )
+
+        if self.path_regularizer is not None:
+            path_gradient, path_jacobian, path_cost = self.path_regularizer.compute(
+                joint_position, self.path_regularizer.reference[:num_problems]
+            )
+            total_jTerror = total_jTerror + path_gradient
+            total_error_norm = total_error_norm + path_cost
+            total_jacobian = torch.cat([total_jacobian, path_jacobian], dim=1)
 
         return ErrorJacobianResult(
             position_errors=position_errors,

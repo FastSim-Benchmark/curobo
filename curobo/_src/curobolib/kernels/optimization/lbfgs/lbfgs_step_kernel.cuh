@@ -48,9 +48,8 @@ __global__ void kernel_lbfgs_step(
   curobo::optimization::lbfgs::load_lbfgs_state_and_compute_differences(
       batch, threadIdx.x, v_dim, grad_q, q, grad_0, x_0, y, s, gq);
 
-  // Compute y^T * s for rho calculation
-  curobo::common::block_reduce_sum(y * s, v_dim, &data[0], &result);
-  ScalarType numerator = result;
+  ScalarType numerator = curobo::optimization::lbfgs::safeguard_curvature_pair(
+      y, s, v_dim, &data[0], &result);
 
   // Update history buffers
   curobo::optimization::lbfgs::update_lbfgs_history_buffers<ScalarType, rolled_ys, FIXED_M>(
@@ -89,6 +88,9 @@ __global__ void kernel_lbfgs_step(
       threadIdx.x, batch, batchsize, v_dim, effective_m, gq, s_buffer, y_buffer,
       rho_buffer, alpha_buffer_sh, &data[0], &result);
 
+
+  curobo::optimization::lbfgs::safeguard_descent_direction(
+      gq, grad_q[batch * v_dim + threadIdx.x], epsilon, v_dim, &data[0], &result);
 
   // Store final step direction
   step_vec[batch * v_dim + threadIdx.x] = -gq;
@@ -143,6 +145,9 @@ __global__ void kernel_lbfgs_step_shared_memory(
   curobo::optimization::lbfgs::load_lbfgs_state_and_compute_differences(
       batch, threadIdx.x, v_dim, grad_q, q, grad_0, x_0, y, s, gq);
 
+  ScalarType numerator = curobo::optimization::lbfgs::safeguard_curvature_pair(
+      y, s, v_dim, &data[0], &result[0]);
+
   // Copy buffers to shared memory for optimized access
   curobo::optimization::lbfgs::copy_buffers_to_shared_memory<ScalarType, FIXED_M>(
       threadIdx.x, batch, batchsize, v_dim, effective_history_m, y, s,
@@ -154,9 +159,7 @@ __global__ void kernel_lbfgs_step_shared_memory(
       threadIdx.x, batch, batchsize, v_dim, effective_history_m,
       y_buffer_sh, s_buffer_sh, y_buffer, s_buffer);
 
-  // Compute y^T * s for rho calculation
-  curobo::common::block_reduce_sum(y * s, v_dim, &data[0], &result[0]);
-  ScalarType numerator = result[0];
+
 
 
   // Update rho buffer and shared memory
@@ -198,6 +201,9 @@ __global__ void kernel_lbfgs_step_shared_memory(
       alpha_buffer_sh, &data[0], &result[0]);
 
 
+
+  curobo::optimization::lbfgs::safeguard_descent_direction(
+      gq, grad_q[batch * v_dim + threadIdx.x], epsilon, v_dim, &data[0], &result[0]);
 
   // Store final step direction
   step_vec[batch * v_dim + threadIdx.x] = -gq;

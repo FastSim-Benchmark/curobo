@@ -71,6 +71,7 @@ class SeedIKSolver:
         self._n_residuals = None
         self.config = config
         self.device_cfg = config.device_cfg
+        self._path_cost_enabled = True
         self._batch_indices = None
 
         # Create executors - they initialize lazily on first call
@@ -153,6 +154,8 @@ class SeedIKSolver:
             n_res += self.dof
         if self.config.acceleration_weight > 0:
             n_res += self.dof
+        if self.config.path_regularization_weight > 0:
+            n_res += 9 * num_links
         return n_res
 
     @classmethod
@@ -179,7 +182,7 @@ class SeedIKSolver:
             self._lm_step = self._setup_lm_step(
                 self.num_links, self.dof, self.n_residuals, tile_threads=self.config.tile_threads
             )
-            self.error_calculator.setup_batch_tensors(batch_size * num_seeds, 1)
+            self.error_calculator.setup_batch_tensors(batch_size, num_seeds)
 
             self._pred_reduction = torch.zeros(
                 (batch_size * num_seeds, 1), device=self.device_cfg.device
@@ -621,6 +624,17 @@ class SeedIKSolver:
         # _setup_batch_size is a no-op if size hasn't changed.
         self._setup_batch_size(batch_size, self.config.num_seeds)
 
+        path_prior = self.error_calculator.path_regularizer
+        if path_prior is not None:
+            path_prior.active.fill_(float(current_state is not None and self._path_cost_enabled))
+            if current_state is not None:
+                path_prior.reference[:batch_size * self.config.num_seeds].copy_(
+                    tensor_repeat_seeds(current_state.position.view(batch_size, 1, self.dof),
+                                        self.config.num_seeds).view(-1, self.dof)
+                )
+            else:
+                path_prior.reference.zero_()
+
         # Update velocity/accel state buffers in-place (addresses stay stable for CUDA graphs).
         self._velocity_dt.fill_(1.0)
         self._velocity_current_position.zero_()
@@ -658,6 +672,7 @@ class SeedIKSolver:
         full_velocity_current_position = self._velocity_current_position.clone()
         full_velocity_current_velocity = self._velocity_current_velocity.clone()
         full_velocity_dt = self._velocity_dt.clone()
+        full_path_reference = path_prior.reference.clone() if path_prior is not None else None
 
         if n_mini_batches > 0:
             solution_list = []
@@ -701,6 +716,9 @@ class SeedIKSolver:
                 self._velocity_current_velocity[:num_problems].copy_(
                     full_velocity_current_velocity[seed_start:seed_end]
                 )
+
+                if path_prior is not None:
+                    path_prior.reference[:num_problems].copy_(full_path_reference[seed_start:seed_end])
 
                 solutions, successes, position_errors, orientation_errors, n_iterations = (
                     self._optimize(mini_batch_seeds_buffer, mini_batch_goal_tool_poses_buffer)

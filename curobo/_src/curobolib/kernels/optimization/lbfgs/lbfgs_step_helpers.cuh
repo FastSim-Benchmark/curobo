@@ -13,6 +13,42 @@ namespace curobo{
 namespace optimization{
 namespace lbfgs{
 
+    // Keep a positive, finite secant model even when a non-Wolfe exploration
+    // step crosses a region of negative curvature. One block owns each pair.
+    template<typename ScalarType>
+    __device__ __forceinline__ ScalarType safeguard_curvature_pair(
+        ScalarType& y, ScalarType& s, const int v_dim,
+        ScalarType* data, float* result)
+    {
+        constexpr float MIN_RELATIVE_CURVATURE = 1.0e-7f;
+        curobo::common::block_reduce_sum(y * s, v_dim, data, result);
+        ScalarType curvature = result[0];
+        curobo::common::block_reduce_sum(y * y, v_dim, data, result);
+        ScalarType norm_y_squared = result[0];
+        curobo::common::block_reduce_sum(s * s, v_dim, data, result);
+        ScalarType norm_product = sqrtf(norm_y_squared * result[0]);
+        if (!(isfinite(curvature) && isfinite(norm_product) &&
+              curvature > MIN_RELATIVE_CURVATURE * norm_product)) {
+            y = 0.0;
+            s = 0.0;
+            curvature = 0.0;
+        }
+        return curvature;
+    }
+
+    template<typename ScalarType>
+    __device__ __forceinline__ void safeguard_descent_direction(
+        ScalarType& inverse_hessian_gradient, const ScalarType gradient,
+        const float epsilon, const int v_dim, ScalarType* data, float* result)
+    {
+        curobo::common::block_reduce_sum(
+            inverse_hessian_gradient * gradient, v_dim, data, result);
+        if (!(isfinite(result[0]) && result[0] > 0.0)) {
+            inverse_hessian_gradient = epsilon * gradient;
+        }
+    }
+
+
     /**
      * @brief Loads current L-BFGS state and computes y and s vectors
      *
