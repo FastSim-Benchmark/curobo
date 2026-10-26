@@ -282,6 +282,7 @@ class MotionPlanner:
         )
 
         validate_boundary_mode(allow_boundary_collision)
+        continuous_contact_seed = None
         with self._hold_axis_scope(hold_axis, current_state):
             if hold_axis and allow_boundary_collision == "none" and max_attempts > 0:
                 from curobo._src.motion.axis_seeds import plan_continuous_axis_seed
@@ -294,18 +295,47 @@ class MotionPlanner:
             if hold_axis and allow_boundary_collision == "end" and max_attempts > 0:
                 from curobo._src.motion.contact_axis_seeds import plan_contact_axis_seed
 
-                continuous = plan_contact_axis_seed(
-                    self, goal_tool_poses, current_state, hold_axis, use_implicit_goal,
-                )
+                continuous_contact_seed = {}
+                planning_error = None
+                try:
+                    continuous = plan_contact_axis_seed(
+                        self, goal_tool_poses, current_state, hold_axis, use_implicit_goal,
+                        diagnostics=continuous_contact_seed,
+                    )
+                except BaseException as error:
+                    planning_error = error
+                    raise
+                finally:
+                    summary_message = (
+                        "Continuous terminal-contact seed summary: " f"{continuous_contact_seed}"
+                    )
+                    try:
+                        log_warn(summary_message)
+                    except Exception:
+                        if planning_error is None:
+                            raise
+                        # A broken handler cannot replace the original planning error.
                 if continuous is not None and bool(continuous.success.any()):
+                    debug = dict(continuous.debug_info or {})
+                    debug.pop("continuous_contact_seed", None)
+                    continuous.debug_info = {
+                        "continuous_contact_seed": continuous_contact_seed, **debug
+                    }
                     return continuous
             if allow_boundary_collision in {"end", "both"}:
                 from curobo._src.motion.motion_contact_goalset import plan_terminal_pose
 
-                return plan_terminal_pose(
+                result = plan_terminal_pose(
                     self, goal_tool_poses, current_state, use_implicit_goal,
                     max_attempts, allow_boundary_collision,
                 )
+                if result is not None and continuous_contact_seed is not None:
+                    debug = dict(result.debug_info or {})
+                    debug.pop("continuous_contact_seed", None)
+                    result.debug_info = {
+                        "continuous_contact_seed": continuous_contact_seed, **debug
+                    }
+                return result
             if allow_boundary_collision != "none":
                 with boundary_contact_scope(
                     self, current_state, None, allow_boundary_collision

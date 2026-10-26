@@ -327,6 +327,14 @@ def _cover(hull: Trimesh, outward: float, proposal_budget: int) -> tuple[np.ndar
                 if len(nearby) else np.full(len(cell), np.inf))
         if box is None and np.any(gaps > _MARGIN):
             for point in cell[gaps > _MARGIN]:
+                # Earlier vertices of this cell may have added a ball that
+                # already contains this witness. Recheck the current proposal
+                # set before spending capacity; volume cells are still checked
+                # and subdivided by the ordinary certification path below.
+                if len(radii) and np.any(
+                    np.linalg.norm(centers - point, axis=1) <= radii - _MARGIN
+                ):
+                    continue
                 add(point)
             stack.append((cell, depth))
         elif depth >= _MAX_DEPTH:

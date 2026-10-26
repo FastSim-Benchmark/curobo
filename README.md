@@ -41,12 +41,20 @@ an axis hold, start/both-boundary contact queries and joint-goal planning retain
 their existing paths.
 
 Axis-held end-contact queries first try a nearby physical-limit-bounded endpoint
-and a continuous seed ending at that exact contact configuration. Intermediate
-IK searches preserve local continuity and reachability to the selected endpoint.
-The authored goal remains authoritative for endpoint and native trajectory
-validation. Contact cleanup and physical-limit restoration run on failure too;
-an unavailable or rejected seed retains the existing terminal-contact search
-and the original shared request deadline.
+and a continuous seed ending at that exact contact configuration. The continuation
+uses at most sixteen steps bounded by local joint search boxes. Intermediate IK
+uses ordinary complete collision checks. Only the captured endpoint metrics and
+native trajectory validation use the end-contact scope. If intermediate IK returns
+no valid candidate, the
+seed may propose a joint-space tail to that same endpoint only when it lies in the
+current local box and exactly matches the terminal hint. This tail is a seed
+proposal; it does not certify a Cartesian path or an accepted trajectory.
+The authored goal and all native endpoint, axis, joint, derivative, self/world
+collision, contact and dense interpolation checks remain authoritative. Contact
+cleanup and physical-limit restoration run on failure too; an unavailable or
+rejected seed retains the existing terminal-contact search and shared deadline.
+A bounded continuation summary records the proposal and outcome even when the
+terminal-contact search supplies the returned result.
 
 ## Recovering an initial trajectory seed
 
@@ -72,6 +80,12 @@ for both the optimized and interpolated trajectories while the request's contact
 scope is still active. Dense collision peaks use the dense state and its own
 metrics rollout. Departure diagnostics distinguish actual support penetration
 from a nonmonotonic clearance change; neither measurement changes acceptance.
+Each bounded raw mesh sample includes its exact active joint state, the selected
+trajectory's endpoint joints, and sphere centers/radii in the kinematics model
+frame. Its at-most-eight pairs also retain the environment-zero mesh slot,
+query-frame-to-mesh-local inverse pose (XYZ plus WXYZ), local dimensions and
+distance mode. These identify the same query sample; they do not export a full
+trajectory or establish an independent physical collision certificate.
 
 Rejected trajectory candidates also log their selected optimized and interpolated
 constraint maxima immediately, before the enclosing search returns. This retains

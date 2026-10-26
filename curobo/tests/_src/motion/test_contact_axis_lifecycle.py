@@ -64,11 +64,12 @@ def test_exact_endpoint_contact_and_restoration(monkeypatch, failure):
     original_solve = planner.ik_solver.solve_pose
 
     def ik(target, **options):
-        assert flags["scope"]
         if options.get("run_optimizer") is False:
+            assert flags["scope"]
             assert torch.equal(active, bounds)
             assert torch.equal(options["seed_config"][0, 0], endpoint.position[0])
             return NS(success=torch.tensor([failure != "endpoint"]))
+        assert not flags["scope"]
         return original_solve(target, **options)
 
     def trajectory(*args, **options):
@@ -87,11 +88,18 @@ def test_exact_endpoint_contact_and_restoration(monkeypatch, failure):
         with pytest.raises(RuntimeError, match="proposal failed"):
             module.plan_contact_continuation(planner, target, current, {"tool": object()})
     else:
-        result = module.plan_contact_continuation(planner, target, current, {"tool": object()})
-        if failure in ("proposal", "prefix", "endpoint"):
+        diagnostics = {}
+        result = module.plan_contact_continuation(
+            planner, target, current, {"tool": object()}, diagnostics=diagnostics
+        )
+        if failure in ("proposal", "endpoint"):
             assert result is None and not flags["trajectory"]
         else:
-            assert result.success.item() == (failure is None)
+            assert result.success.item() == (failure in (None, "prefix"))
+        if failure == "prefix":
+            proposal = diagnostics["seed_record"]["terminal_tail_seed_proposal"]
+            assert proposal["from_ik_step"] == 8
+            assert proposal["reason"] == "native_ik_no_valid_seed"
     assert flags["closed"] and not flags["scope"]
     assert torch.equal(active, bounds)
 

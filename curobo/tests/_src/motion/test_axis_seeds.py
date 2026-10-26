@@ -160,8 +160,8 @@ def test_terminal_contacts_keep_their_existing_planner(monkeypatch, mode):
     monkeypatch.setattr(module, "plan_continuous_axis_seed",
                         lambda *args: pytest.fail("contact query must not use this seed"))
     monkeypatch.setattr("curobo._src.motion.contact_axis_seeds.plan_contact_axis_seed",
-                        lambda *args: None)
-    expected = object()
+                        lambda *args, **kwargs: None)
+    expected = NS(debug_info={})
     monkeypatch.setattr("curobo._src.motion.motion_contact_goalset.plan_terminal_pose",
                         lambda *args: expected)
     planner = MotionPlanner.__new__(MotionPlanner)

@@ -165,6 +165,7 @@ def terminal_failure_summary(planner, result, *, trajectory_kind="optimized"):
         return summary
     metrics = None
     if state is not None and selected_metrics:
+        state = planner.kinematics.get_active_js(state)
         summary["trajectory_kind"] = trajectory_kind
         rollout = (planner.trajopt_solver.metrics_rollout if trajectory_kind == "optimized"
                    else planner.trajopt_solver.additional_metrics_rollouts["interpolated_rollout"])
@@ -237,17 +238,34 @@ def terminal_failure_summary(planner, result, *, trajectory_kind="optimized"):
         if math.isinf(gap):
             continue
         sphere, mesh = divmod(offset, len(indices))
+        mesh_index = int(indices[mesh])
         rows.append(
             {
                 "link": link_names[mapping[sphere]],
                 "sphere": sphere,
-                "obstacle": meshes.names[0][int(indices[mesh])],
+                "sphere_xyzr": spheres[sphere].tolist(),
+                "obstacle": meshes.names[0][mesh_index],
+                # MeshClearance queries environment zero. inv_pose maps the
+                # same frame as the FK spheres into the mesh's local frame;
+                # its stored quaternion is WXYZ, not Warp's XYZW constructor.
+                "mesh_environment_index": 0,
+                "mesh_index": mesh_index,
+                "mesh_inverse_pose_xyz_wxyz": meshes.inv_pose[0, mesh_index, :7].tolist(),
+                "mesh_use_signed_distance": bool(meshes.use_signed_distance[0, mesh_index]),
+                "mesh_dims_m": meshes.dims[0, mesh_index, :3].tolist(),
                 "raw_gap_m": gap,
             }
         )
     summary["raw_mesh_gap_sample"] = {
         "trajectory": trajectory,
         "step": step,
+        "joint_names": list(state.joint_names),
+        "joint_position": selected.position.reshape(-1).tolist(),
+        "selected_endpoint": {
+            "step": positions.shape[-2] - 1,
+            "joint_position": positions[trajectory, -1].tolist(),
+        },
+        "sphere_frame": "kinematics_model",
         "pairs": rows,
         "contact_allowance_applied": False,
     }

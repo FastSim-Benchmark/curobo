@@ -128,6 +128,25 @@ def continuous_axis_seed(planner, goals, current, holds, *, terminal_proposal=No
             valid = (valid & torch.isfinite(candidates).all(dim=-1)
                      & ((candidates >= local[0]) & (candidates <= local[1])).all(dim=-1))
             if not bool(valid.any()):
+                if (hint is not None and terminal_proposal is not None
+                        and bool(((hint >= local[0]) & (hint <= local[1])).all())):
+                    check_time_budget()
+                    proposed = terminal_proposal(planner, goal_group(goals, index), state)
+                    if proposed is None:
+                        return None
+                    chosen = proposed.reorder(names).position.reshape(-1)
+                    if (chosen.shape != hint.shape
+                            or not bool(torch.isfinite(chosen).all())
+                            or not torch.equal(chosen, hint)
+                            or bool(((chosen < local[0]) | (chosen > local[1])).any())):
+                        raise ValueError("Terminal tail proposal must match the bounded hint")
+                    points.append(chosen.clone())
+                    record["terminal_tail_seed_proposal"] = {
+                        "from_ik_step": step,
+                        "reason": "native_ik_no_valid_seed",
+                        "qualification": "seed_proposal_only_not_native_trajectory_acceptance",
+                    }
+                    break
                 return None
             candidates = candidates[valid]
             distances = torch.linalg.vector_norm(candidates - preferred, dim=-1)

@@ -64,23 +64,23 @@ def plan_contact_continuation(
         .cpu()
         .tolist()
     )
+    prepared = continuous_axis_seed(
+        planner,
+        seed_target,
+        current,
+        holds,
+        terminal_proposal=lambda *args: endpoint,
+        terminal_hint=endpoint,
+        diagnostics=diagnostics.setdefault("continuation", {}),
+    )
+    diagnostics["continuous_seed_present"] = prepared is not None
+    if prepared is None:
+        return None
+    _, final, path, record = prepared
+    diagnostics["seed_record"] = record
+    if not torch.equal(final, endpoint.position[0]):
+        raise ValueError("Contact capture and path endpoint differ")
     with boundary_contact_scope(planner, current, endpoint, "end"):
-        prepared = continuous_axis_seed(
-            planner,
-            seed_target,
-            current,
-            holds,
-            terminal_proposal=lambda *args: endpoint,
-            terminal_hint=endpoint,
-            diagnostics=diagnostics.setdefault("continuation", {}),
-        )
-        diagnostics["continuous_seed_present"] = prepared is not None
-        if prepared is None:
-            return None
-        _, final, path, record = prepared
-        diagnostics["seed_record"] = record
-        if not torch.equal(final, endpoint.position[0]):
-            raise ValueError("Contact capture and path endpoint differ")
         check_time_budget()
         checked = planner.ik_solver.solve_pose(
             target,

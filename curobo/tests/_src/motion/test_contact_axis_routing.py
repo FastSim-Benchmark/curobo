@@ -20,10 +20,10 @@ def test_contact_routing_preserves_existing_fallback(monkeypatch, mode, held, at
     import curobo._src.motion.motion_planner as production
 
     calls = []
-    fallback = object()
-    result = NS(success=torch.tensor([outcome == "success"]))
+    fallback = NS(debug_info={})
+    result = NS(success=torch.tensor([outcome == "success"]), debug_info={})
 
-    def candidate(*args):
+    def candidate(*args, **kwargs):
         calls.append("contact")
         if outcome == "timeout":
             raise TimeoutError("deadline")
