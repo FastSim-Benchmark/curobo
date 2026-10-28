@@ -901,8 +901,11 @@ class IKSolver:
             seed_config: Optional initial seeds.
             return_seeds: Number of top solutions to return per problem.
             run_optimizer: When False, skip the main optimizer.
-            prefer_smooth_motion: Override endpoint ranking for this call. False
-                permits an original global-seed retry without mutating configuration.
+            prefer_smooth_motion: Override endpoint ranking for this call. When False,
+                LM optimization with a current state and no explicit seeds uses that
+                state plus fresh global samples, without local reservations or the
+                soft LM path prior. Explicit seeds retain their existing semantics.
+                The override does not mutate configuration.
 
         Returns:
             IKSolverResult with solutions ranked by cost.
@@ -960,8 +963,27 @@ class IKSolver:
         additional_time = 0.0
         current_state = self._fill_current_state_dt(current_state)
 
+        fresh_global_seeds = (
+            prefer_smooth_motion is False
+            and seed_config is None
+            and current_state is not None
+            and self.config.use_lm_seed
+            and run_optimizer
+        )
         if seed_config is None and current_state is not None:
             seed_config = current_state.position.clone().view(batch_size, 1, -1)
+        if fresh_global_seeds:
+            # Supplying a complete bank bypasses LM's local injection and
+            # reserved slots while retaining the current state as one seed.
+            lm_count = self.seed_ik_solver.config.num_seeds
+            start = self.get_active_js(current_state).position.view(batch_size, 1, -1)
+            if lm_count > 1:
+                samples = self.seed_ik_solver.act_sample_gen.get_samples(
+                    batch_size * (lm_count - 1), bounded=True
+                ).view(batch_size, lm_count - 1, self.action_dim)
+                seed_config = torch.cat([start, samples], dim=1)
+            else:
+                seed_config = start.clone()
 
         # Straight-chord preferences do not model obstacle homotopy. Keep the
         # original endpoint objective whenever any scene has registered geometry.
@@ -971,7 +993,7 @@ class IKSolver:
         )
         for seed_solver in [self.seed_ik_solver, *self._local_tool_solvers]:
             if seed_solver is not None:
-                seed_solver._path_cost_enabled = path_cost_enabled
+                seed_solver._path_cost_enabled = path_cost_enabled and not fresh_global_seeds
 
         if self.config.use_lm_seed and run_optimizer:
             if batch_size == 1:

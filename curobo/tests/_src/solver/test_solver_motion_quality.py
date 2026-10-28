@@ -178,3 +178,65 @@ def test_no_endpoint_keeps_full_optimizer_budget_and_rejects_unreachable_goal() 
         assert "failed_ik" in result.debug_info
     finally:
         solver.destroy()
+
+
+@pytest.mark.parametrize("robot,max_batch,quality", [
+    ("franka.yml", 1, True), ("franka.yml", 2, True),
+    ("dual_ur10e.yml", 1, True), ("franka.yml", 1, False),
+])
+def test_fresh_global_retries_advance_samples_and_restore_quality(
+    robot: str, max_batch: int, quality: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Actual CUDA solves use new banks, preserve explicit seeds, and reset call policy."""
+    from curobo._src.solver.solver_ik import IKSolver
+    from curobo._src.solver.solver_ik_cfg import IKSolverCfg
+    from curobo._src.state.state_joint import JointState
+
+    cfg = IKSolverCfg.create(robot=robot, num_seeds=32, seed_solver_num_seeds=128,
+                             max_batch_size=max_batch, use_cuda_graph=True)
+    cfg.prefer_smooth_motion = quality
+    solver = IKSolver(cfg)
+    try:
+        start = JointState.from_position(solver.default_joint_state.position.unsqueeze(0),
+                                        joint_names=solver.joint_names)
+        goal = solver.compute_kinematics(start).tool_poses.as_goal()
+        lm = solver.seed_ik_solver
+        banks, sample_counts = [], []
+        original_generate = lm._generate_seed_configs
+        original_sample = lm.act_sample_gen.get_samples
+
+        def generate(batch_size: int, seed_config: torch.Tensor = None) -> torch.Tensor:
+            bank = original_generate(batch_size, seed_config)
+            banks.append(bank.clone())
+            return bank
+
+        def sample(num_samples: int, **kwargs: object) -> torch.Tensor:
+            sample_counts.append(num_samples)
+            return original_sample(num_samples, **kwargs)
+
+        monkeypatch.setattr(lm, "_generate_seed_configs", generate)
+        monkeypatch.setattr(lm.act_sample_gen, "get_samples", sample)
+        for override in [None, False, False, None]:
+            result = solver.solve_pose(goal, current_state=start, prefer_smooth_motion=override)
+            assert result.success.any()
+            assert result.success.shape[0] == 1  # Padded internal batches stay internal.
+            assert lm._local_seed_active is (quality and override is None)
+            assert cfg.prefer_smooth_motion is quality
+            prior = lm.error_calculator.path_regularizer
+            if quality:
+                assert prior.active.item() == float(override is None)
+        assert sample_counts == [max_batch * 127] * 4
+        assert all(bank.shape == (max_batch, 128, solver.action_dim) for bank in banks)
+        for bank in banks:
+            torch.testing.assert_close(bank[:, 0], start.position.expand(max_batch, -1))
+        assert not torch.equal(banks[0][:, 8:], banks[1][:, 8:])
+        assert not torch.equal(banks[1][:, 1:], banks[2][:, 1:])
+        explicit = banks[1].clone()
+        result = solver.solve_pose(goal, current_state=start, seed_config=explicit[:1],
+                                   prefer_smooth_motion=False)
+        assert result.success.any()
+        assert len(sample_counts) == 4
+        torch.testing.assert_close(banks[-1], explicit[:1].expand(max_batch, -1, -1))
+        assert not lm._local_seed_active
+    finally:
+        solver.destroy()
