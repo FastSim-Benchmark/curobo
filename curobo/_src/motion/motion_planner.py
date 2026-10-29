@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import math
 from contextlib import contextmanager
 from typing import Dict, List, Optional, Union
 
@@ -441,11 +442,15 @@ class MotionPlanner:
                     current_state, seed_config,
                 )
                 if graph_seed is None:
-                    continue
-                seed_traj = graph_seed
-                total_time += 0.0  # graph time already in graph_seed call
-                finetune_attempts = 3
-                finetune_dt_scale = 0.75
+                    if posture_seeds is None:
+                        continue
+                    # A failed roadmap query does not invalidate the current
+                    # posture seed or consume its native trajectory check.
+                else:
+                    seed_traj = graph_seed
+                    total_time += 0.0  # graph time already in graph_seed call
+                    finetune_attempts = 3
+                    finetune_dt_scale = 0.75
 
             if self.config.trajopt_finetune_attempts is not None:
                 finetune_attempts = self.config.trajopt_finetune_attempts
@@ -543,6 +548,41 @@ class MotionPlanner:
 
         Optional time-optimal passes follow ``config.trajopt_finetune_attempts``.
         """
+        if (not free_joints and not held_joints and allow_boundary_collision == "none"
+                and goal_states.position.ndim == 2 and goal_states.position.shape[0] == 1):
+            if isinstance(tolerance, bool) or not math.isfinite(tolerance) or tolerance <= 0:
+                raise ValueError("posture tolerance must be positive and finite")
+            if (isinstance(max_initial_penetration, bool)
+                    or not isinstance(max_initial_penetration, (int, float))
+                    or not math.isfinite(max_initial_penetration) or max_initial_penetration <= 0):
+                raise ValueError("max_initial_penetration must be positive and finite")
+            goal = goal_states.reorder(self.joint_names)
+            # Every coordinate has an explicit single target. A Cartesian IK
+            # projection is unnecessary and can move an already valid endpoint.
+            result = self.plan_cspace(
+                goal, current_state, max_attempts=max_attempts, hold_axis=hold_axis,
+                allow_boundary_collision="none", timeout_s=timeout_s,
+            )
+            if result is None or not bool(result.success.any()):
+                return result
+            q = result.get_interpolated_plan().reorder(self.joint_names).position.reshape(
+                -1, len(self.joint_names)
+            )
+            error = (q[-1] - goal.position[0]).abs().amax()
+            debug = {} if result.debug_info is None else dict(result.debug_info)
+            debug["posture"] = {
+                "candidate_count": 1, "selected_index": 0, "terminal_error": float(error),
+                "held_error": 0.0, "terminal_positions": q[-1].tolist(), "tolerance": tolerance,
+                "native_success": result.success.tolist(), "fully_specified_cspace": True,
+            }
+            result.debug_info = debug
+            if result.goalset_index is not None:
+                result.goalset_index.fill_(0)
+            # Retain the posture caller's exact endpoint tolerance in addition
+            # to every native c-space/dense collision and dynamics check.
+            if not bool(torch.isfinite(q).all()) or bool(error > tolerance):
+                result.success.fill_(False)
+            return result
         from curobo._src.motion.motion_posture import plan_posture
         return plan_posture(
             self, goal_states, current_state,

@@ -12,12 +12,27 @@ import heapq
 
 import numpy as np
 from scipy.optimize import LinearConstraint, NonlinearConstraint, linprog, minimize
+from scipy.sparse import csr_matrix
 from scipy.spatial import ConvexHull, HalfspaceIntersection, cKDTree
 from trimesh import Trimesh
 
 _MARGIN = 1e-7
 _MAX_CELLS = 500000
 _MAX_DEPTH = 32
+_MAX_UNION_SEARCH_NODES = 1000000
+
+
+def _canonical_mesh(mesh):
+    """Keep exact coordinates/winding while removing serialization order."""
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    order = np.lexsort((vertices[:, 2], vertices[:, 1], vertices[:, 0]))
+    inverse = np.empty(len(order), dtype=np.int64)
+    inverse[order] = np.arange(len(order))
+    faces = inverse[np.asarray(mesh.faces)]
+    starts = faces.argmin(axis=1)
+    faces = np.take_along_axis(faces, (np.arange(3)[None]+starts[:, None]) % 3, axis=1)
+    faces = faces[np.lexsort((faces[:, 2], faces[:, 1], faces[:, 0]))]
+    return Trimesh(vertices[order], faces, process=False)
 
 
 def _components(mesh):
@@ -27,7 +42,9 @@ def _components(mesh):
     for part in parts:
         if not part.is_watertight or not part.is_winding_consistent or part.volume <= 0:
             raise ValueError("BOUNDED requires closed outward-oriented components")
-    return parts
+    canonical = [_canonical_mesh(part) for part in parts]
+    return sorted(canonical, key=lambda part: (len(part.vertices),
+        np.asarray(part.vertices).tobytes(), np.asarray(part.faces).tobytes()))
 
 
 def _radial_hull_excess(part, origin):
@@ -89,7 +106,7 @@ def _hull_excess(part):
     clearance = -(normals @ origin + offsets)
     if not np.isfinite(clearance).all() or clearance.min() <= _MARGIN:
         raise ValueError("BOUNDED component kernel is empty or numerically too thin")
-    hull = part.convex_hull
+    hull = _canonical_mesh(part.convex_hull)
     vertices = np.asarray(hull.vertices)
     excess = vertices @ normals.T + offsets
     fraction = np.max(
@@ -345,16 +362,16 @@ def _cover(hull: Trimesh, outward: float, proposal_budget: int) -> tuple[np.ndar
 
 
 def _cover_masks(
-    hull: Trimesh, centers: np.ndarray, radii: np.ndarray,
+    hull: Trimesh, centers: np.ndarray, radii: np.ndarray, *, refinement_levels: int = 0,
 ) -> tuple[list[int], int]:
     """Record every sphere containing each terminal convex volume cell."""
-    stack = [(cell, 0) for cell in _volume_cells(hull)]
+    stack = [(cell, 0, None) for cell in _volume_cells(hull)]
     masks = [0] * len(radii)
     tree = cKDTree(centers)
     search_radius = float(radii.max() + _MARGIN)
     visited = accepted = 0
     while stack:
-        cell, depth = stack.pop()
+        cell, depth, remaining = stack.pop()
         visited += 1
         if visited > _MAX_CELLS or depth > _MAX_DEPTH:
             raise ValueError("BOUNDED full-volume verification budget exhausted")
@@ -363,6 +380,13 @@ def _cover_masks(
         distances = np.linalg.norm(cell[:, None] - centers[None, candidates], axis=-1)
         containing = candidates[np.all(distances <= radii[None, candidates] - _MARGIN, axis=0)]
         if len(containing):
+            # A coarse cell contained by one proposal can hide a different
+            # combination covering its children. Refine the exact partition
+            # before capacity selection; no samples replace volume coverage.
+            remaining = refinement_levels if remaining is None else remaining
+            if remaining:
+                stack.extend((child, depth + 1, remaining - 1) for child in _split(cell))
+                continue
             bit = 1 << accepted
             for index in containing:
                 masks[index] |= bit
@@ -373,7 +397,7 @@ def _cover_masks(
                 if not np.any(np.linalg.norm(centers[nearby] - point, axis=1)
                               <= radii[nearby] + _MARGIN):
                     raise ValueError("BOUNDED result has uncovered volume")
-            stack.extend((child, depth + 1) for child in _split(cell))
+            stack.extend((child, depth + 1, remaining) for child in _split(cell))
     return masks, accepted
 
 
@@ -402,6 +426,108 @@ def _compress(
     return centers[selected], radii[selected]
 
 
+def _select_union_cover(masks, count, capacity):
+    """Guide bounded certified-cell search with a continuous cover relaxation."""
+    full, available = (1 << count) - 1, 0
+    for mask in masks:
+        available |= mask
+    if available & full != full:
+        raise ValueError("BOUNDED union proposals lost a certified volume cell")
+    uncovered, selected = full, []
+    while uncovered and len(selected) < capacity:
+        index = max(range(len(masks)), key=lambda i: (masks[i] & uncovered).bit_count())
+        selected.append(index)
+        uncovered &= ~masks[index]
+    if not uncovered:
+        return selected
+    incidence = [[] for _ in range(count)]
+    for index, mask in enumerate(masks):
+        while mask:
+            bit = mask & -mask
+            incidence[bit.bit_length() - 1].append(index)
+            mask ^= bit
+    # This relaxation only orders actual sphere choices. Fractional values do
+    # not certify coverage: every returned selection is checked with exact cell
+    # masks, and the independent geometry verifier still runs afterwards.
+    constraints = sorted(set(map(tuple, incidence)))
+    lengths = np.asarray([len(row) for row in constraints])
+    matrix = csr_matrix((np.ones(int(lengths.sum())),
+                         (np.repeat(np.arange(len(constraints)), lengths),
+                          np.asarray([i for row in constraints for i in row]))),
+                        shape=(len(constraints), len(masks)))
+    relaxation = linprog(np.ones(len(masks)), A_ub=-matrix,
+                         b_ub=-np.ones(len(constraints)), bounds=(0., 1.),
+                         method="highs", options={"maxiter": 10000, "time_limit": 5.})
+    if not relaxation.success or not np.isfinite(relaxation.x).all():
+        raise ValueError("BOUNDED union cover relaxation failed or exhausted its budget")
+    weights = relaxation.x
+    uncovered, selected = full, []
+    while uncovered and len(selected) < capacity:
+        index = max(range(len(masks)), key=lambda i:
+                    ((masks[i] & uncovered).bit_count() * (weights[i] + 1e-6), -i))
+        selected.append(index)
+        uncovered &= ~masks[index]
+    if not uncovered:
+        return selected
+    witnesses = sorted(range(count), key=lambda i: (len(incidence[i]), i))
+    failed, visited = set(), 0
+
+    def search(remaining, slots):
+        nonlocal visited
+        if not remaining:
+            return []
+        if not slots or (remaining, slots) in failed:
+            return None
+        visited += 1
+        if visited > _MAX_UNION_SEARCH_NODES:
+            raise ValueError("BOUNDED union cover search budget exhausted")
+        gains = [(mask & remaining).bit_count() for mask in masks]
+        maximum = max(gains)
+        # A sphere cannot cover more remaining cells than its current gain.
+        if not maximum or maximum * slots < remaining.bit_count():
+            failed.add((remaining, slots))
+            return None
+        witness = next(i for i in witnesses if remaining & (1 << i))
+        candidates = sorted(incidence[witness], key=lambda i: (-weights[i], -gains[i], i))
+        for index in candidates:
+            tail = search(remaining & ~masks[index], slots - 1)
+            if tail is not None:
+                return [index, *tail]
+        failed.add((remaining, slots))
+        return None
+
+    selected = search((1 << count) - 1, capacity)
+    if selected is not None:
+        return selected
+    raise ValueError("BOUNDED sphere capacity cannot retain full-volume union coverage")
+
+
+def _union_cover(hulls, outward_bounds, capacity):
+    """Share balls across overlapping source components within a small budget.
+
+    Each ball keeps one component as its outward-bound witness. Coverage uses
+    every ball across every source volume cell; it never fills the convex hull
+    of the union. Proposal capacity is independent of the returned ball budget.
+    """
+    centers, radii, owners = [], [], []
+    for index, (hull, outward) in enumerate(zip(hulls, outward_bounds, strict=True)):
+        c, r = _cover(hull, outward, max(256, 4 * capacity))
+        # A locally redundant ball can cover another component better than a
+        # locally selected one. Spend the budget only after global selection.
+        centers.extend(c)
+        radii.extend(r)
+        owners.extend([index] * len(r))
+    centers, radii, owners = np.asarray(centers), np.asarray(radii), np.asarray(owners)
+    masks = [0] * len(radii)
+    count = 0
+    for hull in hulls:
+        local, size = _cover_masks(hull, centers, radii, refinement_levels=2)
+        masks = [whole | (part << count) for whole, part in zip(masks, local, strict=True)]
+        count += size
+    selected = _select_union_cover(masks, count, capacity)
+    return centers[selected], radii[selected], owners[selected].tolist()
+
+
 def bounded_fit_mesh(mesh, num_spheres, max_protrusion_m):
     """Fit within explicit capacity; never truncate spheres to meet the budget."""
     if type(num_spheres) not in (int, np.int64, np.int32) or not 1 <= num_spheres <= 16384:
@@ -410,6 +536,24 @@ def bounded_fit_mesh(mesh, num_spheres, max_protrusion_m):
             or not np.isfinite(max_protrusion_m) or max_protrusion_m <= 1e-5):
         raise ValueError("BOUNDED max_protrusion_m must be finite and greater than 1e-5")
     parts = _components(mesh)
+    if num_spheres <= 50 and len(parts) > 1:
+        hulls, diagnostics, outward_bounds = [], [], []
+        for part in parts:
+            hull, excess = _hull_excess(part)
+            outward = float(max_protrusion_m) - excess - 1e-6
+            if outward <= 1e-5:
+                raise ValueError("BOUNDED component hull excess consumes the outward budget")
+            hulls.append(hull)
+            outward_bounds.append(outward)
+            diagnostics.append({"hull_excess_m": excess})
+        c, r, owners = _union_cover(hulls, outward_bounds, int(num_spheres))
+        for index, diagnostic in enumerate(diagnostics):
+            diagnostic["sphere_count"] = owners.count(index)
+        return c, r, {
+            "max_protrusion_m": float(max_protrusion_m), "sphere_components": owners,
+            "containment_margin_m": _MARGIN, "components": diagnostics,
+            "coverage_scope": "source_union", "full_volume_covered": False,
+        }
     centers, radii, owners, diagnostics = [], [], [], []
     remaining = int(num_spheres)
     for index, part in enumerate(parts):
@@ -444,20 +588,26 @@ def verify_bounded_result(mesh, centers, radii, diagnostics):
     if not np.isfinite(c).all() or not np.isfinite(r).all() or np.any(r <= 0):
         raise ValueError("BOUNDED result must contain finite positive spheres")
     parts = _components(mesh)
-    if np.any(owners < 0) or np.any(owners >= len(parts)):
+    scope = diagnostics.get("coverage_scope", "component")
+    if scope not in ("component", "source_union"):
+        raise ValueError("BOUNDED coverage scope is invalid")
+    if (not np.issubdtype(owners.dtype, np.integer)
+            or np.any(owners < 0) or np.any(owners >= len(parts))):
         raise ValueError("BOUNDED sphere component ownership is invalid")
     maximum = 0.0
     for index, part in enumerate(parts):
         hull, excess = _hull_excess(part)
         cc, rr = c[owners == index], r[owners == index]
-        if not len(rr):
+        if not len(rr) and scope == "component":
             raise ValueError("BOUNDED result omits a source component")
-        eq = ConvexHull(hull.vertices).equations
-        inside = -(cc @ eq[:, :3].T + eq[:, 3]).max(axis=1)
-        outward = rr - inside + excess
-        if np.any(inside < 0) or np.any(outward > diagnostics["max_protrusion_m"]):
-            raise ValueError("BOUNDED result exceeds the source-relative outward bound")
-        maximum = max(maximum, float(outward.max()))
-        _cover_masks(hull, cc, rr)
+        if len(rr):
+            eq = ConvexHull(hull.vertices).equations
+            inside = -(cc @ eq[:, :3].T + eq[:, 3]).max(axis=1)
+            outward = rr - inside + excess
+            if np.any(inside < 0) or np.any(outward > diagnostics["max_protrusion_m"]):
+                raise ValueError("BOUNDED result exceeds the source-relative outward bound")
+            maximum = max(maximum, float(outward.max()))
+        _cover_masks(hull, c if scope == "source_union" else cc,
+                     r if scope == "source_union" else rr)
     diagnostics["full_volume_covered"] = True
     diagnostics["verified_max_protrusion_m"] = maximum

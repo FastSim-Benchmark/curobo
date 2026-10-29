@@ -191,3 +191,136 @@ def test_depth_terminal_ball_still_obeys_outward_constraint(monkeypatch, outward
         c, r = module._cover(mesh, outward, 256)
         _, count = module._cover_masks(mesh, c, r)
         assert count == len(module._volume_cells(mesh))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_small_budget_shares_balls_across_duplicate_source_components(dtype):
+    """Overlapping decomposition pieces must not spend the capacity repeatedly."""
+    box = trimesh.creation.box([.001, .002, .001])
+    mesh = trimesh.util.concatenate([box.copy() for _ in range(12)])
+    result = fit_spheres_to_mesh(
+        mesh, num_spheres=1, fit_type=SphereFitType.BOUNDED,
+        max_protrusion_m=.002, device_cfg=DeviceCfg(device="cpu", dtype=dtype),
+    )
+    proof = result.debug_info["bounded"]
+    assert result.num_spheres == 1
+    assert len(proof["components"]) == 12
+    assert proof["coverage_scope"] == "source_union"
+    assert proof["full_volume_covered"]
+    assert proof["verified_max_protrusion_m"] <= .002
+    verify_bounded_result(mesh, result.centers.numpy(), result.radii.numpy(), proof)
+
+
+def test_small_budget_never_bridges_separated_components():
+    """Sharing cannot replace separated physical bodies by their convex hull."""
+    left = trimesh.creation.box([.001]*3)
+    right = left.copy()
+    right.apply_translation([.02, 0, 0])
+    mesh = trimesh.util.concatenate([left, right])
+    with pytest.raises(ValueError, match="capacity"):
+        fit(mesh, num_spheres=1)
+    result = fit(mesh, num_spheres=2)
+    assert result.num_spheres == 2
+    c, r = result.centers.numpy(), result.radii.numpy()
+    proof = result.debug_info["bounded"]
+    with pytest.raises(ValueError, match="uncovered"):
+        verify_bounded_result(mesh, c[:1], r[:1],
+                              {**proof, "sphere_components": proof["sphere_components"][:1]})
+    with pytest.raises(ValueError, match="outward"):
+        verify_bounded_result(mesh, c, r+.01, proof)
+    with pytest.raises(ValueError, match="scope"):
+        verify_bounded_result(mesh, c, r, {**proof, "coverage_scope": "convex_hull"})
+    for owners in ([.1, 1.1], [True, False], [0, float('nan')]):
+        with pytest.raises(ValueError, match="ownership"):
+            verify_bounded_result(mesh, c, r, {**proof, "sphere_components": owners})
+
+
+@pytest.mark.parametrize("capacity", [41, 50])
+def test_relaxed_budget_still_shares_more_source_components_than_capacity(capacity):
+    """A larger capacity must retain union fitting rather than reserve one ball per piece."""
+    box = trimesh.creation.box([.001, .002, .001])
+    mesh = trimesh.util.concatenate([box.copy() for _ in range(51)])
+    result = fit(mesh, num_spheres=capacity)
+    proof = result.debug_info["bounded"]
+    assert result.num_spheres == 1
+    assert proof["coverage_scope"] == "source_union"
+    assert len(proof["components"]) == 51 and proof["full_volume_covered"]
+    verify_bounded_result(mesh, result.centers.numpy(), result.radii.numpy(), proof)
+
+
+def test_small_budget_branch_route_recovers_from_greedy_dead_end():
+    """The largest first set can require three balls where two suffice."""
+    from curobo._src.geom.sphere_fit.fit_bounded import _select_union_cover
+
+    assert set(_select_union_cover([0b001111, 0b010011, 0b101100], 6, 2)) == {1, 2}
+    with pytest.raises(ValueError, match="capacity"):
+        _select_union_cover([0b001, 0b010, 0b100], 3, 2)
+    with pytest.raises(ValueError, match="lost"):
+        _select_union_cover([0b001, 0b010], 3, 3)
+
+
+def test_small_budget_branch_search_is_explicitly_bounded(monkeypatch):
+    import curobo._src.geom.sphere_fit.fit_bounded as module
+
+    monkeypatch.setattr(module, "_MAX_UNION_SEARCH_NODES", 0)
+    with pytest.raises(ValueError, match="search budget"):
+        module._select_union_cover([0b011, 0b110, 0b101], 3, 1)
+
+
+def test_union_route_keeps_locally_redundant_balls_for_global_coverage(monkeypatch):
+    """A discarded local tie can be the only one-ball global solution."""
+    import curobo._src.geom.sphere_fit.fit_bounded as module
+
+    def cover(hull, *_):
+        indices = [0, 1] if hull == 'left' else [2]
+        return np.array([[i, 0, 0] for i in indices]), np.ones(len(indices))
+
+    def masks(hull, centers, _, **kwargs):
+        assert kwargs == {'refinement_levels': 2}
+        # Ball 1 covers both bodies; ball 0 covers only the first body.
+        covered = {0, 1} if hull == 'left' else {1, 2}
+        return [3 if int(c[0]) in covered else 0 for c in centers], 2
+
+    monkeypatch.setattr(module, '_cover', cover)
+    monkeypatch.setattr(module, '_cover_masks', masks)
+    c, r, owners = module._union_cover(['left', 'right'], [.002, .002], 1)
+    np.testing.assert_array_equal(c, [[1, 0, 0]])
+    np.testing.assert_array_equal(r, [1])
+    assert owners == [0]
+
+
+def test_refined_volume_partition_retains_alternative_sphere_combinations():
+    import curobo._src.geom.sphere_fit.fit_bounded as module
+
+    mesh = trimesh.creation.box([.02] * 3)
+    cell = module._volume_cells(mesh)[0]
+    children = module._split(cell)
+    centers = np.array([cell.mean(axis=0), *[child.mean(axis=0) for child in children]])
+    radii = np.array([.05, *[np.linalg.norm(child-center, axis=1).max()+1e-5
+                            for child, center in zip(children, centers[1:], strict=True)]])
+    coarse, count = module._cover_masks(mesh, centers, radii)
+    assert count == 1
+    assert coarse[1] | coarse[2] == 0
+    refined, count = module._cover_masks(mesh, centers, radii, refinement_levels=2)
+    assert count == 4
+    assert refined[1] | refined[2] == (1 << count)-1
+
+
+def test_source_component_and_mesh_serialization_order_do_not_change_the_fit():
+    first = trimesh.creation.box([.024, .008, .019])
+    second = trimesh.creation.box([.013, .025, .011])
+    second.apply_translation([.018, .003, .002])
+    original = trimesh.util.concatenate([first, second])
+    reordered = trimesh.util.concatenate([second, first])
+    order = np.random.default_rng(12).permutation(len(reordered.vertices))
+    inverse = np.empty(len(order), dtype=int)
+    inverse[order] = np.arange(len(order))
+    faces = inverse[reordered.faces[::-1]]
+    faces = np.roll(faces, 1, axis=1)  # A cyclic rotation retains winding.
+    shuffled = trimesh.Trimesh(np.asarray(reordered.vertices)[order], faces, process=False)
+    a = fit(original, num_spheres=40, max_protrusion_m=.0149, max_bottom_protrusion_m=.0149)
+    b = fit(shuffled, num_spheres=40, max_protrusion_m=.0149, max_bottom_protrusion_m=.0149)
+    np.testing.assert_array_equal(a.centers, b.centers)
+    np.testing.assert_array_equal(a.radii, b.radii)
+    assert a.debug_info['bounded']['full_volume_covered']
+    assert b.debug_info['bounded']['full_volume_covered']

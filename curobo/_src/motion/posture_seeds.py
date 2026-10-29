@@ -89,9 +89,14 @@ class PostureSeeds:
         self.solve_time = 0.0
 
     def endpoint_seeds(self, attempt):
-        """Keep the first solve unchanged, then explore free-joint branches."""
+        """Check authored endpoints first, then explore free-joint branches."""
         if attempt == 0:
-            return None
+            indices = torch.arange(self.count, device=self.goals.device) % len(self.goals)
+            seeds = self.goals[indices].clone()
+            seeds[:, self.free | self.held] = self.start[self.free | self.held]
+            # Do not clip authored coordinates: bounds and every native
+            # endpoint constraint must reject an invalid goal as supplied.
+            return seeds.unsqueeze(0)
         return sample_posture_states(
             self.start, self.goals, self.limits, self.free, self.held,
             self.count, attempt, intermediate=False,

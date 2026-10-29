@@ -181,6 +181,20 @@ For a phone-sized rectangular plate, `num_spheres=40` selects a 40-sphere
 outer contour proxy. This does not certify the filled volume. Routing decisions
 are recorded in `debug_info["routing"]`; existing defaults remain unchanged.
 
+For compound BOUNDED requests with capacity at most 50, source components share
+coverage balls instead of spending capacity independently on overlapping pieces.
+When greedy selection exceeds capacity, a sparse continuous cover relaxation
+guides actual sphere choices and branching over certified volume cells.
+Fractional weights never certify coverage: the selected integer set must cover
+every cell within capacity. The relaxation is bounded to 10,000 iterations and
+five seconds, and branching to 1,000,000 nodes. Each retained ball still has its own
+source-component outward witness, and every component's complete volume is checked
+again after conversion and clipping. An exhausted budget raises; it never returns
+a truncated fit or substitutes a filled convex hull for the source union.
+BOUNDED canonicalizes component, vertex and triangle ordering before subdivision.
+This retains exact coordinates and triangle winding so mesh serialization order
+cannot change the selected fitting route or spend a different sphere budget.
+
 An explicit `SphereFitType.RIM` selection fits a plate's outer convex
 projected contour and its observed rim-height band with 4--50 spheres, without
 a height-to-width cutoff. It uses the complete compound to avoid treating
@@ -351,7 +365,10 @@ and cannot recur after release. Other pairs retain ordinary collision checks;
 other contact policies are rejected. Mesh queries reuse the current scene BVH.
 The interpolated result is also checked against the declared joint tolerances.
 
-The first attempt retains ordinary endpoint seeding. Subsequent attempts within
+The first attempt seeds exact authored goal members, retaining captured values
+for free and held coordinates. Native endpoint checks can accept a feasible
+goal directly before optimization; invalid goals retain all rejection checks.
+Authored coordinates are not clipped or mixed across goal members. Subsequent attempts within
 `max_attempts` explore deterministic limit-relative free-joint configurations and
 intermediate posture candidates. Native IK checks intermediate candidates with
 the same axis, held-joint, collision and start-contact constraints. Accepted
@@ -361,6 +378,12 @@ bounded to at most 256 intermediate IK seeds per retry, and does not alter the
 global random generator. Rejected intermediate batches retain endpoint-only
 seeding; all-failed planning still reports failure. The result debug field
 `posture_seed_attempts` records sampled and accepted intermediate counts.
+
+When the first trajectory attempt fails, posture goal sets also use the native
+graph planner for detour seeds within the same attempt limit and deadline. If
+the roadmap query finds no route, the current posture seed remains available
+for native optimization. Graph output is only a seed; collision, dense-path,
+held-joint and terminal-goal acceptance stay unchanged.
 
 `contact_links` restricts initial-contact capture to spheres on named robot links;
 `None` considers all active spheres. Collision checks for other pairs stay active.

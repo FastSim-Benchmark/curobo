@@ -94,6 +94,17 @@ cuRobo provides seven fitting selections via :class:`curobo.sphere_fit.SphereFit
        ``max_protrusion_m > 1e-5``. Verifies complete component volume coverage
        and a source-relative outward distance bound after output conversion
        and clipping. Unsupported geometry and insufficient capacity raise.
+       For compound meshes with capacity at most 50, balls may cover cells
+       from multiple source components. Each ball retains one component as
+       its outward-bound witness; all source volumes are still verified.
+       Greedy selection precedes a deterministic branch search with at most
+       10,000 nodes. Two additional cell bisections preserve alternative sphere
+       combinations hidden by a coarse covered cell. Search exhaustion raises
+       explicitly. The final count never exceeds the requested capacity;
+       larger budgets retain the
+       component-by-component fitting route.
+       Component, vertex and triangle serialization order is canonicalized
+       without moving coordinates or reversing winding before subdivision.
    * - ``AUTO``
      - Routes explicit ``max_protrusion_m`` requests to BOUNDED. Otherwise,
        routes a single closed rectangular plate with an explicit 4--50 sphere
@@ -146,6 +157,13 @@ Other hulls retain tetrahedral subdivision, with enclosing-ball feasibility
 checked before further refinement. Every candidate is checked after numerical
 conversion. Compression uses spatial sphere queries and deterministic lazy
 greedy selection; final output coverage is independently checked again.
+Small compound requests with at most 50 spheres first share certified cells
+across their source components. If greedy selection exceeds capacity, a sparse
+continuous set-cover relaxation guides actual sphere choices and bounded
+branching. Fractional weights never certify coverage: the selected integer
+set must cover every original certified cell and satisfy the sphere budget.
+The relaxation has a 10000-iteration, five-second limit; branching retains its
+1000000-node limit. Exhausting either budget raises explicitly.
 Refinement is bounded by 32 levels and 500000
 cell visits per component per verification pass; exhaustion raises explicitly.
 The output supports float32 and float64. BOUNDED never truncates its sphere set

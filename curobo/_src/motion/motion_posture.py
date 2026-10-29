@@ -178,7 +178,7 @@ def plan_posture(
         ):
             with planner._hold_axis_scope(hold_axis, current_state):
                 result = planner._plan_pose_single(
-                    goals, current_state, max_attempts, max_attempts,
+                    goals, current_state, max_attempts, 1,
                     posture_seeds=PostureSeeds(planner, current_state, positions, mask, held),
                 )
                 if result is not None and not bool(result.success.any()):

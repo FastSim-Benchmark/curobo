@@ -203,3 +203,44 @@ def test_posture_preserves_joint_seeds_and_restores_cartesian_lm(monkeypatch):
         ordinary = solver.solve_pose(goal, current_state=start, return_seeds=1)
         assert ordinary.success.all()
         assert calls == [True]
+
+
+@pytest.mark.parametrize("use_cuda_graph", [False, True])
+def test_multi_target_posture_retries_through_native_graph(monkeypatch, use_cuda_graph):
+    with MotionPlanner(MotionPlannerCfg.create(
+        "franka.yml", num_ik_seeds=8, num_trajopt_seeds=4, use_cuda_graph=use_cuda_graph,
+    )) as planner:
+        names = planner.joint_names
+        start = JointState.from_position(
+            planner.default_joint_state.position.unsqueeze(0), joint_names=names,
+        )
+        positions = start.position.repeat(2, 1)
+        positions[:, 0] += positions.new_tensor([.1, -.1])
+        goals = JointState.from_position(positions, joint_names=names)
+        original_solve = planner.trajopt_solver.solve_pose
+        original_graph = planner._get_graph_seed_trajectories
+        native_calls, graph_results = [], []
+
+        def reject_first_trajectory(*args, **kwargs):
+            result = original_solve(*args, **kwargs)
+            native_calls.append(True)
+            if len(native_calls) == 1:
+                result.success.fill_(False)
+            return result
+
+        def record_graph(*args, **kwargs):
+            seed = original_graph(*args, **kwargs)
+            graph_results.append(seed is not None)
+            return seed
+
+        monkeypatch.setattr(planner.trajopt_solver, "solve_pose", reject_first_trajectory)
+        monkeypatch.setattr(planner, "_get_graph_seed_trajectories", record_graph)
+        result = planner.plan_posture(goals, start, max_attempts=2, timeout_s=30.)
+        assert native_calls == [True, True]
+        assert graph_results == [True]
+        assert result is not None and result.success.all()
+        q = result.get_interpolated_plan().reorder(names).position.reshape(-1, len(names))
+        assert torch.isfinite(q).all()
+        assert (q[-1]-positions).abs().amax(-1).min() <= .01
+        # Request costs and CUDA graphs must be restored after graph seeding too.
+        assert planner.plan_cspace(start, start, max_attempts=1).success.all()

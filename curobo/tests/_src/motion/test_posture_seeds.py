@@ -109,7 +109,9 @@ def test_rejected_midpoints_never_become_paths(accepted):
         planner, JointState.from_position(start, joint_names=planner.joint_names),
         goal, torch.tensor([1, 0, 1]), torch.tensor([0, 0, 1]),
     )
-    assert context.endpoint_seeds(0) is None
+    first = context.endpoint_seeds(0)
+    assert first.shape == (1, 4, 3)
+    assert torch.equal(first[0], torch.tensor([[.7, 0., .3]]).repeat(4, 1))
     assert context.trajectory_seeds(None, goal.unsqueeze(0), 0) is None
     paths = context.trajectory_seeds(None, goal.unsqueeze(0), 1)
     assert (paths is not None) == accepted
@@ -119,3 +121,20 @@ def test_rejected_midpoints_never_become_paths(accepted):
     assert torch.equal(cost.goals, original)
     assert cost.valid.sum() == 1
     assert context.total_time == .2 and context.solve_time == .1
+
+
+def test_first_posture_seeds_keep_exact_goal_members_without_mixing_or_clipping():
+    from curobo._src.motion.posture_seeds import PostureSeeds
+
+    context = object.__new__(PostureSeeds)
+    context.start = torch.tensor([.1, .2, .3])
+    context.goals = torch.tensor([[.7, 2., .3], [-.8, -.4, .3]])
+    context.free = torch.tensor([False, False, False])
+    context.held = torch.tensor([False, False, True])
+    context.count = 4
+    original = context.goals.clone()
+    first = context.endpoint_seeds(0)
+    assert torch.equal(first[0], original.repeat(2, 1))
+    # An out-of-limit authored goal must reach native bounds validation intact.
+    assert first[0, 0, 1] == 2.
+    assert torch.equal(context.goals, original)
