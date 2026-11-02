@@ -181,7 +181,7 @@ For a phone-sized rectangular plate, `num_spheres=40` selects a 40-sphere
 outer contour proxy. This does not certify the filled volume. Routing decisions
 are recorded in `debug_info["routing"]`; existing defaults remain unchanged.
 
-For compound BOUNDED requests with capacity at most 50, source components share
+For compound BOUNDED requests at every requested capacity, source components share
 coverage balls instead of spending capacity independently on overlapping pieces.
 When greedy selection exceeds capacity, a sparse continuous cover relaxation
 guides actual sphere choices and branching over certified volume cells.

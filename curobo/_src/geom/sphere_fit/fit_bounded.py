@@ -503,7 +503,7 @@ def _select_union_cover(masks, count, capacity):
 
 
 def _union_cover(hulls, outward_bounds, capacity):
-    """Share balls across overlapping source components within a small budget.
+    """Share balls across overlapping source components within the requested budget.
 
     Each ball keeps one component as its outward-bound witness. Coverage uses
     every ball across every source volume cell; it never fills the convex hull
@@ -536,7 +536,7 @@ def bounded_fit_mesh(mesh, num_spheres, max_protrusion_m):
             or not np.isfinite(max_protrusion_m) or max_protrusion_m <= 1e-5):
         raise ValueError("BOUNDED max_protrusion_m must be finite and greater than 1e-5")
     parts = _components(mesh)
-    if num_spheres <= 50 and len(parts) > 1:
+    if len(parts) > 1:
         hulls, diagnostics, outward_bounds = [], [], []
         for part in parts:
             hull, excess = _hull_excess(part)
