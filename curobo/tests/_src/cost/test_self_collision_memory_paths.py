@@ -67,10 +67,11 @@ def test_shared_and_global_reads_match(monkeypatch, blocks, store):
 
 
 @pytest.mark.parametrize("blocks", [1, 32])
-def test_model_exceeding_actual_shared_memory(blocks):
+@pytest.mark.parametrize("requested_spheres", [0, 24832])
+def test_model_exceeding_actual_shared_memory(blocks, requested_spheres):
     """High-index pairs remain enabled without requiring all spheres in shared memory."""
     limit = geometry._device_max_shared_memory(torch.cuda.current_device())
-    n = (limit - geometry.STATIC_SMEM_OVERHEAD) // 16 + 19
+    n = max(requested_spheres, (limit - geometry.STATIC_SMEM_OVERHEAD) // 16 + 19)
     assert n < 32767
     spheres = torch.zeros((2, 3, n, 4), device="cuda")
     spheres[..., 3] = -1

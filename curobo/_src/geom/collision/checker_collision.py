@@ -64,6 +64,23 @@ class CollisionChecker:
     #: Internal tensor for max_distance.
     _max_distance_t: Optional[torch.Tensor] = field(default=None, repr=False)
 
+    #: Authored sphere/obstacle exclusions; updated only between planning calls.
+    filtered_cuboid_ids: Optional[torch.Tensor] = field(default=None, repr=False)
+    filtered_mesh_ids: Optional[torch.Tensor] = field(default=None, repr=False)
+
+    @staticmethod
+    def _merge_pair_maps(
+        authored: Optional[torch.Tensor], contact: Optional[torch.Tensor]
+    ) -> Optional[torch.Tensor]:
+        """Combine authored pairs with independently bounded contact replacements."""
+        if authored is None:
+            return contact
+        if contact is None:
+            return authored
+        return torch.cat(
+            (authored, contact.unsqueeze(-1) if contact.ndim == 2 else contact), dim=-1
+        )
+
     def __post_init__(self):
         """Convert float distances to tensors."""
         if isinstance(self.max_distance, float):
@@ -85,7 +102,7 @@ class CollisionChecker:
             or replacement_cuboid_ids.shape[:2] != (scene.num_envs, query_sphere.shape[-2])
             or (
                 replacement_cuboid_ids.ndim == 3
-                and not 1 <= replacement_cuboid_ids.shape[-1] <= 8
+                and replacement_cuboid_ids.shape[-1] < 1
             )
             or replacement_cuboid_ids.dtype != torch.int32
             or replacement_cuboid_ids.device != query_sphere.device
@@ -93,7 +110,7 @@ class CollisionChecker:
         ):
             log_and_raise(
                 "replacement_cuboid_ids must be contiguous int32 "
-                "(num_envs, num_spheres[, 1..8]) "
+                "(num_envs, num_spheres[, pair_count]) "
                 "on the query sphere device"
             )
 
@@ -122,7 +139,7 @@ class CollisionChecker:
             activation_distance: Distance outside obstacles to start computing cost.
             env_query_idx: Environment index for each batch. If None, uses single env.
             return_loss: True if result will be scaled before backward pass.
-            replacement_cuboid_ids: Optional int32 (num_envs, num_spheres[, 1..8]) map.
+            replacement_cuboid_ids: Optional int32 (num_envs, num_spheres[, pair_count]) map.
                 Nonnegative entries replace that sphere/cuboid pair with an external
                 constraint. The caller must evaluate that constraint; -1 keeps normal checks.
             replacement_mesh_ids: Same map contract for mesh pairs, independently of cuboid pairs.
@@ -130,6 +147,10 @@ class CollisionChecker:
         Returns:
             Collision distance tensor [batch, horizon, num_spheres].
         """
+        replacement_cuboid_ids = self._merge_pair_maps(
+            self.filtered_cuboid_ids, replacement_cuboid_ids
+        )
+        replacement_mesh_ids = self._merge_pair_maps(self.filtered_mesh_ids, replacement_mesh_ids)
         b = query_sphere.shape[0]
         if replacement_cuboid_ids is not None:
             self._validate_replacement_map(scene, query_sphere, replacement_cuboid_ids)
@@ -189,7 +210,7 @@ class CollisionChecker:
             enable_speed_metric: Scale collision cost by sphere speed.
             env_query_idx: Environment index for each batch.
             return_loss: True if result will be scaled before backward pass.
-            replacement_cuboid_ids: Optional int32 (num_envs, num_spheres[, 1..8]) map.
+            replacement_cuboid_ids: Optional int32 (num_envs, num_spheres[, pair_count]) map.
                 Nonnegative entries replace that sphere/cuboid pair with an external
                 constraint. The caller must evaluate that constraint; -1 keeps normal checks.
             replacement_mesh_ids: Same map contract for mesh pairs, independently of cuboid pairs.
@@ -197,6 +218,10 @@ class CollisionChecker:
         Returns:
             Collision distance tensor [batch, horizon, num_spheres].
         """
+        replacement_cuboid_ids = self._merge_pair_maps(
+            self.filtered_cuboid_ids, replacement_cuboid_ids
+        )
+        replacement_mesh_ids = self._merge_pair_maps(self.filtered_mesh_ids, replacement_mesh_ids)
         b = query_sphere.shape[0]
         if replacement_cuboid_ids is not None:
             self._validate_replacement_map(scene, query_sphere, replacement_cuboid_ids)

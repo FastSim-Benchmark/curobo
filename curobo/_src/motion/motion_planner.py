@@ -91,6 +91,28 @@ class MotionPlanner:
                 self.config.graph_planner_config, self.scene_collision_checker
             )
 
+    def set_collision_pair_filters(self, filters: dict[str, tuple[int, ...]]) -> None:
+        """Replace authored obstacle/sphere exclusions without disabling other checks.
+
+        Keys are loaded obstacle names; values are global collision-sphere indices.
+        Empty input removes all exclusions. Call after world and payload updates,
+        before planning. Graphs are invalidated only when the resolved map changes.
+        """
+        if self.scene_collision_checker is None:
+            if filters:
+                log_and_raise("Pair filters require a scene collision checker")
+            return
+        changed = self.scene_collision_checker.set_collision_pair_filters(
+            filters, num_spheres=self.kinematics.total_spheres,
+        )
+        if changed:
+            self.ik_solver.core.invalidate_parameter_graphs()
+            self.trajopt_solver.core.invalidate_parameter_graphs()
+            if self.graph_planner is not None:
+                self.graph_planner.reset_buffer()
+                for rollout in self.graph_planner.get_all_rollout_instances():
+                    rollout.reset_cuda_graph()
+
     # -- Lifecycle --
 
     def destroy(self):
@@ -268,23 +290,30 @@ class MotionPlanner:
         hold_axis: Optional[Dict[str, AxisHold]] = None,
         allow_boundary_collision: str = "none",
         timeout_s: float | None = None,
+        stationary_contact_links: tuple[str, ...] = (),
     ) -> Optional[TrajOptSolverResult]:
         """Plan to poses with an optional start-referenced axis hold per tool.
 
         Parameters last for this call only. ``allow_boundary_collision`` accepts
         ``none``, ``start``, ``end``, or ``both`` for bounded static mesh/cuboid endpoint
         contacts. Other pairs and self collision retain their ordinary checks.
+        ``stationary_contact_links`` names existing contacts that must remain
+        fixed throughout IK and the path (maximum initial overlap 2 mm).
+        It can combine with disjoint start departures; end/both remain unsupported.
         ``config.trajopt_finetune_attempts`` controls optional additional
         time-optimal passes without changing initial-solve validation.
         """
         from curobo._src.motion.motion_contact import (
             boundary_contact_scope,
+            stationary_contact_scope,
             validate_boundary_mode,
         )
 
         validate_boundary_mode(allow_boundary_collision)
         continuous_contact_seed = None
-        with self._hold_axis_scope(hold_axis, current_state):
+        with self._hold_axis_scope(hold_axis, current_state), stationary_contact_scope(
+            self, current_state, stationary_contact_links, allow_boundary_collision,
+        ):
             if hold_axis and allow_boundary_collision == "none" and max_attempts > 0:
                 from curobo._src.motion.axis_seeds import plan_continuous_axis_seed
 
