@@ -301,7 +301,9 @@ def stationary_contact_scope(
             solver.core.invalidate_parameter_graphs()
             for cost in scene_costs(solver):
                 if cost._contact is not None:
-                    log_and_raise("Stationary contact cannot override configured contact declarations")
+                    log_and_raise(
+                        "Stationary contact cannot override configured contact declarations"
+                    )
                 saved.append((cost, cost._contact))
                 cost._contact = StationaryContactSet(
                     declarations, cost.config.scene_collision_checker, cost.config.num_spheres,
@@ -359,7 +361,9 @@ def boundary_contact_scope(
         for solver in solvers:
             solver.core.invalidate_parameter_graphs()
             for cost in scene_costs(solver):
-                stationary = cost._contact if isinstance(cost._contact, StationaryContactSet) else None
+                stationary = (
+                    cost._contact if isinstance(cost._contact, StationaryContactSet) else None
+                )
                 if cost._contact is not None and (stationary is None or mode != "start"):
                     log_and_raise(
                         "Per-call boundary contact cannot override configured contact declarations"
@@ -374,7 +378,9 @@ def boundary_contact_scope(
                         )
                 elif stationary is not None:
                     declarations = departure if isinstance(departure, tuple) else (departure,)
-                    cost._contact = ContactDepartureSet(declarations, scene, count, stationary=stationary)
+                    cost._contact = ContactDepartureSet(
+                        declarations, scene, count, stationary=stationary
+                    )
                 elif departure is not None and arrival is not None:
                     cost._contact = ContactTransfer(departure, arrival, scene, count)
                 elif isinstance(departure, tuple):

@@ -101,10 +101,10 @@ def test_tilt_threshold_independent_of_yaw(
 
 @pytest.mark.parametrize("weight", [1.0, 1000.0])
 @pytest.mark.parametrize("tilt,valid", [(0.005, True), (0.0099, True), (0.0101, False)])
-def test_motion_axis_tolerance_is_geometric(
+def test_motion_axis_tolerance_preserves_existing_weighted_threshold(
     device_cfg: DeviceCfg, weight: float, tilt: float, valid: bool,
 ) -> None:
-    """AxisHold radians remain the same in weighted optimization and validation."""
+    """Contact extensions preserve the pre-existing weighted axis acceptance rule."""
     cost = AxisHoldCost(ToolPoseCostCfg(
         weight=[0.0, weight], tool_frames=["cup"], device_cfg=device_cfg,
         use_grad_input=True,
@@ -116,7 +116,8 @@ def test_motion_axis_tolerance_is_geometric(
     cost.set_hold({"cup": AxisHold(tolerance_rad=0.01)}, start)
     current = rotation([1, 0, 0], tilt, device_cfg).requires_grad_()
     value = cost.forward(ToolPose(["cup"], position, current.reshape(1, 1, 1, 4))).sum()
-    assert (float(value) == 0.0) == valid
+    valid = valid and weight == 1.0
+    assert (float(value.detach()) == 0.0) == valid
     gradient = torch.autograd.grad(value, current)[0]
     if valid:
         torch.testing.assert_close(gradient, torch.zeros_like(gradient), atol=0, rtol=0)

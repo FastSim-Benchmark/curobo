@@ -20,12 +20,17 @@ class StationaryContactSet:
         """Apply the existing depth admission to one through eight static supports."""
         if not 1 <= len(declarations) <= 8:
             log_and_raise("Stationary contact supports 1..8 captured supports")
-        self.contacts = tuple(ContactSeparation(item, scene, num_spheres) for item in declarations)
-        self.replacement_ids = torch.stack([item.replacement_ids for item in self.contacts], dim=-1)
-        self.replacement_mesh_ids = torch.stack([
-            item.replacement_mesh_ids if item.is_mesh else torch.full_like(item.replacement_ids, -1)
-            for item in self.contacts
-        ], dim=-1)
+        self.contacts = tuple(
+            ContactSeparation(item, scene, num_spheres) for item in declarations
+        )
+        self.replacement_ids = torch.stack(
+            [item.replacement_ids for item in self.contacts], dim=-1
+        )
+        self.replacement_mesh_ids = torch.stack(
+            [item.replacement_mesh_ids if item.is_mesh
+             else torch.full_like(item.replacement_ids, -1) for item in self.contacts],
+            dim=-1,
+        )
 
     def cost(self, robot_spheres: torch.Tensor) -> torch.Tensor:
         """Return (batch, horizon, sphere) violations, including single-state IK."""

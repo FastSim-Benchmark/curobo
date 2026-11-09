@@ -48,11 +48,6 @@ class AxisHoldCost(ToolPoseCost):
                 item = ToolPoseCriteria.hold_axis(
                     list(hold.axis), hold.tolerance_rad, self.device_cfg
                 )
-                # The pose kernel thresholds weighted squared error. AxisHold
-                # declares a geometric angle, also for non-unit optimizer costs.
-                scale = self._weight[1].sqrt()
-                item.terminal_pose_convergence_tolerance[1] *= scale
-                item.non_terminal_pose_convergence_tolerance[1] *= scale
                 item.terminal_pose_axes_weight_factor[:3] = 0.0
                 criteria[frame] = item
         self.update_tool_pose_criteria(criteria)

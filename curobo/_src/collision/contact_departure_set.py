@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
+
 from curobo._src.collision.contact_separation import ContactSeparation, StartContact
 from curobo._src.geom.collision.collision_scene import SceneCollision
 from curobo._src.util.logging import log_and_raise
@@ -44,7 +45,9 @@ class ContactDepartureSet:
             dim=-1,
         )
         if stationary is not None:
-            self.replacement_ids = torch.cat((self.replacement_ids, stationary.replacement_ids), -1)
+            self.replacement_ids = torch.cat(
+                (self.replacement_ids, stationary.replacement_ids), -1
+            )
             self.replacement_mesh_ids = torch.cat(
                 (self.replacement_mesh_ids, stationary.replacement_mesh_ids), -1)
 

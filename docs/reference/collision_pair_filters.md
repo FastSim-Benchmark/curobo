@@ -31,3 +31,17 @@ captured solver graphs must invalidate them when the result is true. The
 
 Returns the currently excluded sphere indices for a loaded obstacle name, or an
 empty tuple when no pair is excluded.
+
+## Explicit stationary contacts
+
+`MotionPlanner.plan_pose(..., stationary_contact_links=())` keeps the existing
+planning path by default. A nonempty tuple captures existing contacts on those
+robot links with the normal 2 mm initial penetration bound. Captured sphere
+centers and radii must remain fixed within the existing numerical tolerance;
+all other collision pairs remain checked. The scope is cleared on success and
+failure. It supports `allow_boundary_collision="none"` and disjoint `"start"`
+departures; captured stationary contacts with `"end"` or `"both"` are rejected.
+
+These extensions preserve the existing weighted axis-hold tolerance rule.
+Bounded sphere fitting accepts an explicit budget up to 24,576 spheres; budgets
+through 16,384 retain the existing fitting search and coverage validation.

@@ -563,8 +563,7 @@ def bounded_fit_mesh(mesh, num_spheres, max_protrusion_m):
             raise ValueError("BOUNDED component hull excess consumes the outward budget")
         if remaining <= 0:
             raise ValueError("BOUNDED sphere capacity exhausted")
-        # Candidate search is independent of the remaining output capacity.
-        c, r = _cover(hull, outward, min(32767, 2 * int(num_spheres)))
+        c, r = _cover(hull, outward, min(32767, 2 * remaining))
         c, r = _compress(hull, c, r)
         if len(r) > remaining:
             raise ValueError("BOUNDED sphere capacity cannot retain full-volume coverage")
