@@ -15,7 +15,7 @@ The design separates:
 from __future__ import annotations
 
 # Standard Library
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
@@ -29,6 +29,7 @@ from curobo._src.geom.data.data_scene import SceneData
 from curobo._src.geom.types import Cuboid, Obstacle, SceneCfg
 from curobo._src.types.device_cfg import DeviceCfg
 from curobo._src.types.pose import Pose
+from curobo._src.util.logging import log_and_raise
 
 if TYPE_CHECKING:
     from curobo._src.robot.kinematics.kinematics_state import KinematicsState
@@ -83,6 +84,73 @@ class SceneCollision:
 
     #: CPU reference to scene configuration.
     scene_model: Optional[Union[SceneCfg, List[SceneCfg]]] = None
+
+    #: Complete authored filter declaration, keyed by obstacle name.
+    _pair_filters: dict[str, tuple[int, ...]] = field(default_factory=dict, repr=False)
+    #: Resolved slots and sphere count used to detect changes before CUDA graph reuse.
+    _pair_filter_signature: tuple = field(default=(), repr=False)
+
+    def set_collision_pair_filters(
+        self, filters: Mapping[str, Sequence[int]], *, num_spheres: int
+    ) -> bool:
+        """Replace authored exclusions in one environment; return whether storage changed.
+
+        Only named cuboid/mesh versus sphere-index pairs are excluded. Other
+        spheres and obstacles remain enabled. Empty input restores all pairs.
+        Call between queries; planners must reset captured graphs if True is returned.
+        Unknown obstacles, voxel filters, or invalid indices fail before mutation.
+        """
+        if self.num_envs != 1 or type(num_spheres) is not int or num_spheres < 1:
+            log_and_raise("Pair filters require one environment and a positive sphere count")
+        if not filters and not self._pair_filters:
+            return False
+        resolved = {"cuboid": [], "mesh": []}
+        normalized = {}
+        for name, indices in sorted(filters.items()):
+            values = tuple(indices)
+            if (not values or any(type(i) is not int or not 0 <= i < num_spheres for i in values)
+                    or len(set(values)) != len(values)):
+                log_and_raise("Pair filter sphere indices must be distinct and in range")
+            found = False
+            for kind, data in (("cuboid", self.data.cuboids), ("mesh", self.data.meshes)):
+                if data is not None and data.has_name(name, 0):
+                    resolved[kind].append((name, data.get_idx(name, 0), tuple(sorted(values))))
+                    found = True
+                    break
+            if not found:
+                log_and_raise(f"Pair filter obstacle is unknown or unsupported: {name}")
+            normalized[name] = tuple(sorted(values))
+        signature = (num_spheres, tuple(resolved["cuboid"]), tuple(resolved["mesh"]))
+        if signature == self._pair_filter_signature:
+            return False
+        maps = {}
+        for kind, entries in resolved.items():
+            by_sphere = [[] for _ in range(num_spheres)]
+            for _, obstacle, indices in entries:
+                for index in indices:
+                    by_sphere[index].append(obstacle)
+            width = max(map(len, by_sphere), default=0)
+            maps[kind] = None if not width else torch.tensor(
+                [[ids + [-1] * (width - len(ids)) for ids in by_sphere]],
+                device=self.device_cfg.device, dtype=torch.int32,
+            )
+        self.checker.filtered_cuboid_ids = maps["cuboid"]
+        self.checker.filtered_mesh_ids = maps["mesh"]
+        self._pair_filters = normalized
+        self._pair_filter_signature = signature
+        return True
+
+    def filtered_sphere_indices(self, obstacle: str) -> tuple[int, ...]:
+        """Return authored exclusions for boundary-contact capture."""
+        return self._pair_filters.get(obstacle, ())
+
+    def _clear_pair_filters(self) -> None:
+        """Restore checks in existing graphs before obstacle slots can be reused."""
+        for tensor in (self.checker.filtered_cuboid_ids, self.checker.filtered_mesh_ids):
+            if tensor is not None:
+                tensor.fill_(-1)
+        self._pair_filters = {}
+        self._pair_filter_signature = ()
 
     @classmethod
     def from_config(cls, config: SceneCollisionCfg) -> "SceneCollision":
@@ -385,6 +453,7 @@ class SceneCollision:
             scene_model: Scene configuration with obstacles.
             env_idx: Environment index to load into.
         """
+        self._clear_pair_filters()
         self.data.load_from_scene_cfg(scene_model, env_idx)
         self.scene_model = scene_model
 
@@ -397,6 +466,7 @@ class SceneCollision:
         Queries must not overlap updates. A runtime/device failure requires
         discarding the owning solver; invalid names/capacities fail before writes.
         """
+        self._clear_pair_filters()
         self.data.apply_obstacle_updates(obstacles, removed, env_idx)
         # Attachment lookup reads this CPU reference. Keep its typed lists and
         # flattened object view consistent without copying unchanged geometry.
@@ -488,6 +558,7 @@ class SceneCollision:
             env_idx: If provided, clear only this environment.
                     If None, clear all environments.
         """
+        self._clear_pair_filters()
         self.data.clear(env_idx)
 
     def get_num_scene_collision_checkers(self) -> int:

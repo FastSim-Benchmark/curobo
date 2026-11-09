@@ -43,7 +43,7 @@ def test_two_solids_keep_empty_gap_and_cover_complete_returned_volume(dtype):
 
 @pytest.mark.parametrize("kwargs", [
     {"num_spheres": None}, {"num_spheres": True}, {"num_spheres": 0},
-    {"num_spheres": 16385}, {"max_protrusion_m": None},
+    {"num_spheres": 24577}, {"max_protrusion_m": None},
     {"max_protrusion_m": True}, {"max_protrusion_m": 0},
     {"max_protrusion_m": float("nan")},
 ])

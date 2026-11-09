@@ -28,6 +28,7 @@ def planner() -> SimpleNamespace:
     spheres = torch.tensor([[0.599, 0, 0, 0.1], [0.2, 0, 0, -1.0]])
     return SimpleNamespace(
         scene_collision_checker=SimpleNamespace(
+            filtered_sphere_indices=lambda name: (),
             data=SimpleNamespace(num_envs=1, cuboids=cuboids, meshes=None),
             device_cfg=SimpleNamespace(device=torch.device("cpu")),
         ),
@@ -64,6 +65,12 @@ def test_contact_link_filter_preserves_ineligible_spheres(planner) -> None:
     state = torch.zeros((1, 2))
     assert capture_contact(planner, state, terminal=False, contact_links=("tool",)) is not None
     assert capture_contact(planner, state, terminal=False, contact_links=("disabled",)) is None
+
+
+def test_stationary_spheres_are_not_recaptured_as_departures(planner) -> None:
+    """A frozen holding contact must not be required to leave its support."""
+    assert capture_contact(planner, torch.zeros((1, 2)), terminal=False,
+                           excluded_sphere_indices=(0,)) is None
 
 
 def test_excess_penetration_still_rejects_capture(planner) -> None:

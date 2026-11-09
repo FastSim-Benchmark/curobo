@@ -18,6 +18,7 @@ from curobo._src.collision.contact_separation import (
     StartContact,
     _ContactPenetrationError,
 )
+from curobo._src.collision.contact_stationary import StationaryContactSet
 from curobo._src.collision.contact_transfer import ContactTransfer
 from curobo._src.state.state_joint import JointState
 from curobo._src.types.pose import Pose
@@ -166,6 +167,7 @@ def capture_contact(
     terminal: bool,
     max_initial_penetration: float = 0.002,
     contact_links: tuple[str, ...] | None = None,
+    excluded_sphere_indices: tuple[int, ...] = (),
 ) -> StartContact | GoalContact | tuple[StartContact, ...] | None:
     """Capture bounded static support contacts in the current planning frame."""
     scene = planner.scene_collision_checker
@@ -184,6 +186,10 @@ def capture_contact(
                 link
             )
             eligible[ids] = True
+    if excluded_sphere_indices:
+        if any(type(i) is not int or not 0 <= i < len(spheres) for i in excluded_sphere_indices):
+            log_and_raise("Excluded contact sphere indices must be in range")
+        eligible[list(excluded_sphere_indices)] = False
     cuboids = scene.data.cuboids
     contacts = []
     # Freeze the small enable mask once. Reading one CUDA scalar per reserved
@@ -202,7 +208,11 @@ def capture_contact(
         )
         outside = local.abs() - cuboids.dims[0, index, :3] * 0.5
         gap = outside.clamp_min(0).norm(dim=-1) + outside.amax(-1).clamp_max(0) - spheres[:, 3]
-        indices = torch.nonzero(eligible & (spheres[:, 3] > 0) & (gap <= 1.0e-5)).reshape(-1)
+        touching = eligible & (spheres[:, 3] > 0) & (gap <= 1.0e-5)
+        filtered = scene.filtered_sphere_indices(name)
+        if filtered:
+            touching[list(filtered)] = False
+        indices = torch.nonzero(touching).reshape(-1)
         if indices.numel() == 0:
             continue
         selected = tuple(indices.tolist())
@@ -226,6 +236,10 @@ def capture_contact(
         if mesh_indices.numel():
             gaps = MeshClearance.apply(spheres, meshes, mesh_indices)
             touching = eligible[:, None] & (spheres[:, 3:4] > 0) & (gaps <= 1.0e-5)
+            for column, index in enumerate(mesh_indices.tolist()):
+                filtered = scene.filtered_sphere_indices(meshes.names[0][index])
+                if filtered:
+                    touching[list(filtered), column] = False
             for column in torch.nonzero(touching.any(0)).reshape(-1).tolist():
                 index = int(mesh_indices[column])
                 indices = torch.nonzero(touching[:, column]).reshape(-1)
@@ -259,6 +273,50 @@ def capture_contact(
 
 
 @contextmanager
+def stationary_contact_scope(
+    planner: MotionPlanner,
+    start: JointState,
+    links: tuple[str, ...],
+    boundary_mode: str,
+) -> Iterator[None]:
+    """Keep explicitly selected existing contacts fixed in IK and every path sample."""
+    if (not isinstance(links, tuple)
+            or any(not isinstance(link, str) or not link or link != link.strip() for link in links)
+            or len(set(links)) != len(links)):
+        log_and_raise("stationary_contact_links must be a tuple of distinct nonempty robot links")
+    if not links:
+        yield
+        return
+    declarations = capture_contact(planner, start, terminal=False, contact_links=links)
+    if declarations is None:
+        yield
+        return
+    if boundary_mode not in {"none", "start"}:
+        log_and_raise("Captured stationary contacts cannot yet combine with boundary contact")
+    declarations = declarations if isinstance(declarations, tuple) else (declarations,)
+    saved = []
+    solvers = (planner.ik_solver, planner.trajopt_solver)
+    try:
+        for solver in solvers:
+            solver.core.invalidate_parameter_graphs()
+            for cost in scene_costs(solver):
+                if cost._contact is not None:
+                    log_and_raise(
+                        "Stationary contact cannot override configured contact declarations"
+                    )
+                saved.append((cost, cost._contact))
+                cost._contact = StationaryContactSet(
+                    declarations, cost.config.scene_collision_checker, cost.config.num_spheres,
+                )
+        yield
+    finally:
+        for cost, previous in saved:
+            cost._contact = previous
+        for solver in solvers:
+            solver.core.invalidate_parameter_graphs()
+
+
+@contextmanager
 def boundary_contact_scope(
     planner: MotionPlanner,
     start: JointState,
@@ -268,6 +326,10 @@ def boundary_contact_scope(
     contact_links: tuple[str, ...] | None = None,
 ) -> Iterator[None]:
     """Install contact constraints before graph capture and restore them on every exit."""
+    held = next((cost._contact for cost in scene_costs(planner.ik_solver)
+                 if isinstance(cost._contact, StationaryContactSet)), None)
+    exclusions = {} if held is None else {"excluded_sphere_indices": tuple(sorted({
+        i for contact in held.contacts for i in contact.declaration.sphere_indices}))}
     departure = (
         capture_contact(
             planner,
@@ -275,6 +337,7 @@ def boundary_contact_scope(
             terminal=False,
             max_initial_penetration=max_initial_penetration,
             contact_links=contact_links,
+            **exclusions,
         )
         if mode in {"start", "both"}
         else None
@@ -298,7 +361,10 @@ def boundary_contact_scope(
         for solver in solvers:
             solver.core.invalidate_parameter_graphs()
             for cost in scene_costs(solver):
-                if cost._contact is not None:
+                stationary = (
+                    cost._contact if isinstance(cost._contact, StationaryContactSet) else None
+                )
+                if cost._contact is not None and (stationary is None or mode != "start"):
                     log_and_raise(
                         "Per-call boundary contact cannot override configured contact declarations"
                     )
@@ -310,6 +376,11 @@ def boundary_contact_scope(
                         cost._contact = ContactApproach(
                             replace(arrival, terminal_only=True), scene, count
                         )
+                elif stationary is not None:
+                    declarations = departure if isinstance(departure, tuple) else (departure,)
+                    cost._contact = ContactDepartureSet(
+                        declarations, scene, count, stationary=stationary
+                    )
                 elif departure is not None and arrival is not None:
                     cost._contact = ContactTransfer(departure, arrival, scene, count)
                 elif isinstance(departure, tuple):

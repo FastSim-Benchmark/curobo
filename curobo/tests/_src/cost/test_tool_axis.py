@@ -10,11 +10,12 @@ import pytest
 import torch
 
 from curobo._src.cost.cost_tool_pose import ToolPoseCost
+from curobo._src.cost.cost_axis_hold import AxisHoldCost
 from curobo._src.cost.cost_tool_pose_cfg import ToolPoseCostCfg
 from curobo._src.geom.transform import quaternion_rate_to_axis_angle_rate
 from curobo._src.util.warp import init_warp
 from curobo.examples.reference.tool_orientation import make_planner
-from curobo.types import DeviceCfg, GoalToolPose, JointState, Pose, ToolPose, ToolPoseCriteria
+from curobo.types import AxisHold, DeviceCfg, GoalToolPose, JointState, Pose, ToolPose, ToolPoseCriteria
 
 
 @pytest.fixture(scope="module")
@@ -96,6 +97,33 @@ def test_tilt_threshold_independent_of_yaw(
     value, angle = evaluate(cost, current, goal)
     assert (float(value) == 0.0) == valid
     assert float(angle) == pytest.approx(tilt, abs=2e-6)
+
+
+@pytest.mark.parametrize("weight", [1.0, 1000.0])
+@pytest.mark.parametrize("tilt,valid", [(0.005, True), (0.0099, True), (0.0101, False)])
+def test_motion_axis_tolerance_preserves_existing_weighted_threshold(
+    device_cfg: DeviceCfg, weight: float, tilt: float, valid: bool,
+) -> None:
+    """Contact extensions preserve the pre-existing weighted axis acceptance rule."""
+    cost = AxisHoldCost(ToolPoseCostCfg(
+        weight=[0.0, weight], tool_frames=["cup"], device_cfg=device_cfg,
+        use_grad_input=True,
+    ))
+    cost.setup_batch_tensors(1, 1)
+    position = torch.zeros((1, 1, 1, 3), device=device_cfg.device)
+    initial = rotation([0, 0, 1], 0, device_cfg)
+    start = ToolPose(["cup"], position, initial.reshape(1, 1, 1, 4))
+    cost.set_hold({"cup": AxisHold(tolerance_rad=0.01)}, start)
+    current = rotation([1, 0, 0], tilt, device_cfg).requires_grad_()
+    value = cost.forward(ToolPose(["cup"], position, current.reshape(1, 1, 1, 4))).sum()
+    valid = valid and weight == 1.0
+    assert (float(value.detach()) == 0.0) == valid
+    gradient = torch.autograd.grad(value, current)[0]
+    if valid:
+        torch.testing.assert_close(gradient, torch.zeros_like(gradient), atol=0, rtol=0)
+    else:
+        assert float(value) == pytest.approx(weight * tilt * tilt, rel=2e-5)
+        assert float(gradient.norm()) > 0
 
 
 @pytest.mark.parametrize("project", [False, True])
