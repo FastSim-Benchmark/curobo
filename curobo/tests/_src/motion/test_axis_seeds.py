@@ -145,11 +145,12 @@ def test_public_dispatch_preserves_ordinary_search_after_seed_rejection(
     planner = MotionPlanner.__new__(MotionPlanner)
     planner._destroyed = True
     planner._hold_axis_scope = lambda *args: nullcontext()
-    planner._plan_pose = lambda *args: calls.append("ordinary") or ordinary
-    result = planner.plan_pose(NS(), NS(), hold_axis={"tool": object()} if held else None)
+    planner._plan_pose = lambda *args: calls.append(("ordinary", args[-2:])) or ordinary
+    result = planner.plan_pose(NS(), NS(), hold_axis={"tool": object()} if held else None,
+                               max_attempts=3, enable_graph_attempt=1)
     assert result is (planned if held and success else ordinary)
     assert calls == (["continuous"] if held and success else
-                     ["continuous", "ordinary"] if held else ["ordinary"])
+                     ["continuous", ("ordinary", (3, 1))] if held else [("ordinary", (3, 1))])
 
 
 @pytest.mark.parametrize("mode", ["end", "both"])

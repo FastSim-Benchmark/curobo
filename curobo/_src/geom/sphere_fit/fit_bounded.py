@@ -639,8 +639,8 @@ def _tiled_cover(hulls, outward_bounds, capacity):
 
 def bounded_fit_mesh(mesh, num_spheres, max_protrusion_m):
     """Fit within explicit capacity; never truncate spheres to meet the budget."""
-    if type(num_spheres) not in (int, np.int64, np.int32) or not 1 <= num_spheres <= 16384:
-        raise ValueError("BOUNDED num_spheres must be an integer budget in [1, 16384]")
+    if type(num_spheres) not in (int, np.int64, np.int32) or not 1 <= num_spheres <= 24576:
+        raise ValueError("BOUNDED num_spheres must be an integer budget in [1, 24576]")
     if (isinstance(max_protrusion_m, bool) or max_protrusion_m is None
             or not np.isfinite(max_protrusion_m) or max_protrusion_m <= 1e-5):
         raise ValueError("BOUNDED max_protrusion_m must be finite and greater than 1e-5")
