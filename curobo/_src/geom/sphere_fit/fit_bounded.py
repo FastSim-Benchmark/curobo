@@ -9,12 +9,14 @@ This is offline preprocessing; no random samples establish either guarantee.
 """
 
 import heapq
+from itertools import product
 
 import numpy as np
 from scipy.optimize import LinearConstraint, NonlinearConstraint, linprog, minimize
 from scipy.sparse import csr_matrix
 from scipy.spatial import ConvexHull, HalfspaceIntersection, cKDTree
 from trimesh import Trimesh
+from trimesh.bounds import oriented_bounds
 
 _MARGIN = 1e-7
 _MAX_CELLS = 500000
@@ -216,6 +218,9 @@ def _witness_ball(point, equations, centroid, outward):
     directions = np.repeat(directions, 6, axis=0)
     depths = (depths[:, None] * np.array([0.25, 0.5, 0.75, 0.95, 0.999, 1])).reshape(-1)
     centers = (point[None] - depths[:, None] * directions).astype(np.float32).astype(float)
+    # Directional steps can all leave a thin solid even for an interior witness.
+    # Retain the unshifted point under the same output-precision and bound checks.
+    centers = np.vstack([centers, np.asarray(point, dtype=np.float32).astype(float)])
     inside = np.min(-(normals @ centers.T + offsets[:, None]), axis=0)
     radii = np.nextafter((inside + outward * 0.99).astype(np.float32), np.float32(np.inf))
     radii = radii.astype(float)
@@ -528,6 +533,110 @@ def _union_cover(hulls, outward_bounds, capacity):
     return centers[selected], radii[selected], owners[selected].tolist()
 
 
+def _tile_ball(cell, equations, centroid, outward):
+    """Enclose a box tile with a source-interior center and checked outward bound."""
+    normals, offsets = equations[:, :3], equations[:, 3]
+
+    def checked(point):
+        center = point.astype(np.float32).astype(float)
+        inside = float(-(normals @ center + offsets).max())
+        radius = float(np.nextafter(np.float32(inside + outward * .99), np.float32(-np.inf)))
+        if (inside >= 0 and radius > 0 and radius - inside <= outward
+                and np.linalg.norm(cell - center, axis=1).max() <= radius - _MARGIN):
+            return center, radius
+        return None
+
+    for point in (cell.mean(axis=0), centroid):
+        ball = checked(point)
+        if ball is not None:
+            return ball
+
+    def clearance(x):
+        return x[3] - np.linalg.norm(cell - x[:3], axis=1)
+
+    def jacobian(x):
+        delta = cell - x[:3]
+        return np.c_[delta / np.maximum(np.linalg.norm(delta, axis=1)[:, None], 1e-15),
+                     np.ones(len(cell))]
+
+    initial = np.r_[centroid, np.linalg.norm(cell - centroid, axis=1).max() + _MARGIN]
+    solved = minimize(lambda x: x[3], initial, jac=lambda x: np.array([0., 0., 0., 1.]),
+        method="SLSQP", constraints=[
+            LinearConstraint(np.c_[normals, np.zeros(len(normals))], -np.inf,
+                             -offsets - _MARGIN * .1),
+            LinearConstraint(np.c_[normals, np.ones(len(normals))], -np.inf,
+                             outward * .99 - offsets),
+            NonlinearConstraint(clearance, 2 * _MARGIN, np.inf, jac=jacobian),
+        ], options={"ftol": 1e-12, "maxiter": 100})
+    if not solved.success:
+        return None
+    # Reserve interior clearance before output float32 conversion. The complete
+    # tile and original source halfspaces are checked again after this nudge.
+    return checked(solved.x[:3] * .999 + centroid * .001)
+
+
+def _tiled_component_cover(hull, outward, capacity, bounds):
+    to_box, extents = bounds
+    inverse = np.linalg.inv(to_box)
+    extents = np.asarray(extents) + 2 * _MARGIN
+    thin = int(np.argmin(extents))
+    axes = [axis for axis in range(3) if axis != thin]
+    centroid = hull.vertices.mean(axis=0)
+    equations = ConvexHull(hull.vertices).equations
+    clearance = max(float(-(equations[:, :3] @ point + equations[:, 3]).max())
+                    for point in (centroid, inverse[:3, 3]))
+    radius = clearance + outward * .99
+    proposals = []
+    for first, second in product(range(1, 33), repeat=2):
+        counts = np.ones(3, dtype=int)
+        counts[axes] = [first, second]
+        if (int(counts.prod()) <= capacity
+                and np.linalg.norm(extents / counts / 2) < radius - 2 * _MARGIN):
+            proposals.append(counts)
+    proposals.sort(key=lambda counts: (int(counts.prod()),
+        float(np.linalg.norm(extents / counts)), tuple(counts)))
+    for counts in proposals[:8]:
+        step = extents / counts
+        centers, radii = [], []
+        for index in product(*(range(int(count)) for count in counts)):
+            low = -extents / 2 + np.asarray(index) * step
+            corners = np.asarray(list(product(*zip(low, low + step, strict=True))))
+            cell = corners @ inverse[:3, :3].T + inverse[:3, 3]
+            ball = _tile_ball(cell, equations, centroid, outward)
+            if ball is None:
+                break
+            center, radius = ball
+            centers.append(center)
+            radii.append(radius)
+        if len(radii) == int(counts.prod()):
+            return np.asarray(centers), np.asarray(radii)
+    return None
+
+
+def _tiled_cover(hulls, outward_bounds, capacity):
+    """Try complete checked box partitions for compounds with a broad thin slab.
+
+    Dyadic witness subdivision can overspend capacity on a wide thin floor.
+    Tiles partition an enclosing box; every returned sphere contains all eight
+    tile vertices while retaining its original component as outward witness.
+    Unsuccessful finite proposals leave the existing bounded search unchanged.
+    """
+    bounds = [oriented_bounds(hull) for hull in hulls]
+    if not any(np.sort(extents)[0] <= 2 * outward and np.sort(extents)[1] >= 8 * outward
+               for (_, extents), outward in zip(bounds, outward_bounds, strict=True)):
+        return None
+    centers, radii, owners = [], [], []
+    for index, (hull, outward, box) in enumerate(zip(hulls, outward_bounds, bounds, strict=True)):
+        cover = _tiled_component_cover(hull, outward, capacity - len(radii), box)
+        if cover is None:
+            return None
+        c, r = cover
+        centers.extend(c)
+        radii.extend(r)
+        owners.extend([index] * len(r))
+    return np.asarray(centers), np.asarray(radii), owners
+
+
 def bounded_fit_mesh(mesh, num_spheres, max_protrusion_m):
     """Fit within explicit capacity; never truncate spheres to meet the budget."""
     if type(num_spheres) not in (int, np.int64, np.int32) or not 1 <= num_spheres <= 16384:
@@ -546,13 +655,17 @@ def bounded_fit_mesh(mesh, num_spheres, max_protrusion_m):
             hulls.append(hull)
             outward_bounds.append(outward)
             diagnostics.append({"hull_excess_m": excess})
-        c, r, owners = _union_cover(hulls, outward_bounds, int(num_spheres))
+        tiled = _tiled_cover(hulls, outward_bounds, int(num_spheres))
+        c, r, owners = (_union_cover(hulls, outward_bounds, int(num_spheres))
+                        if tiled is None else tiled)
         for index, diagnostic in enumerate(diagnostics):
             diagnostic["sphere_count"] = owners.count(index)
         return c, r, {
             "max_protrusion_m": float(max_protrusion_m), "sphere_components": owners,
             "containment_margin_m": _MARGIN, "components": diagnostics,
-            "coverage_scope": "source_union", "full_volume_covered": False,
+            "coverage_scope": "source_union" if tiled is None else "component",
+            "coverage_method": "union_search" if tiled is None else "checked_box_tiles",
+            "full_volume_covered": False,
         }
     centers, radii, owners, diagnostics = [], [], [], []
     remaining = int(num_spheres)
@@ -563,8 +676,12 @@ def bounded_fit_mesh(mesh, num_spheres, max_protrusion_m):
             raise ValueError("BOUNDED component hull excess consumes the outward budget")
         if remaining <= 0:
             raise ValueError("BOUNDED sphere capacity exhausted")
-        c, r = _cover(hull, outward, min(32767, 2 * remaining))
-        c, r = _compress(hull, c, r)
+        tiled = _tiled_cover([hull], [outward], remaining)
+        if tiled is None:
+            c, r = _cover(hull, outward, min(32767, 2 * remaining))
+            c, r = _compress(hull, c, r)
+        else:
+            c, r, _ = tiled
         if len(r) > remaining:
             raise ValueError("BOUNDED sphere capacity cannot retain full-volume coverage")
         remaining -= len(r)
@@ -577,6 +694,35 @@ def bounded_fit_mesh(mesh, num_spheres, max_protrusion_m):
         "containment_margin_m": _MARGIN,
         "components": diagnostics, "full_volume_covered": False,
     }
+
+
+def _verify_box_partition(hull: Trimesh, centers: np.ndarray, radii: np.ndarray) -> None:
+    """Independently enclose the current source in tiles covered by returned balls."""
+    to_box, extents = oriented_bounds(hull)
+    inverse = np.linalg.inv(to_box)
+    source = hull.vertices @ to_box[:3, :3].T + to_box[:3, 3]
+    low = np.minimum(source.min(axis=0), -extents / 2)
+    high = np.maximum(source.max(axis=0), extents / 2)
+    axes = np.argsort(extents)[-2:]
+    for first in range(1, 33):
+        if not len(radii) or len(radii) % first:
+            continue
+        second = len(radii) // first
+        if second > 32:
+            continue
+        counts = np.ones(3, dtype=int)
+        counts[axes] = [first, second]
+        step = (high - low) / counts
+        for index in product(*(range(int(count)) for count in counts)):
+            cell_low = low + np.asarray(index) * step
+            corners = np.asarray(list(product(*zip(cell_low, cell_low + step, strict=True))))
+            cell = corners @ inverse[:3, :3].T + inverse[:3, 3]
+            distance = np.linalg.norm(cell[:, None] - centers[None], axis=-1)
+            if not np.any(np.all(distance <= radii[None] - _MARGIN, axis=0)):
+                break
+        else:
+            return
+    raise ValueError("BOUNDED returned spheres do not certify the source box partition")
 
 
 def verify_bounded_result(mesh, centers, radii, diagnostics):
@@ -607,7 +753,13 @@ def verify_bounded_result(mesh, centers, radii, diagnostics):
             if np.any(inside < 0) or np.any(outward > diagnostics["max_protrusion_m"]):
                 raise ValueError("BOUNDED result exceeds the source-relative outward bound")
             maximum = max(maximum, float(outward.max()))
-        _cover_masks(hull, c if scope == "source_union" else cc,
-                     r if scope == "source_union" else rr)
+        if diagnostics.get("coverage_method") == "checked_box_tiles":
+            # Rebuild an enclosing partition from the current source, and check
+            # the actual converted/clipped output. A different tetrahedral
+            # subdivision can fail to terminate at valid tile boundaries.
+            _verify_box_partition(hull, cc, rr)
+        else:
+            _cover_masks(hull, c if scope == "source_union" else cc,
+                         r if scope == "source_union" else rr)
     diagnostics["full_volume_covered"] = True
     diagnostics["verified_max_protrusion_m"] = maximum

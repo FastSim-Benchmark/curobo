@@ -624,10 +624,28 @@ class MotionPlanner:
                 with boundary_contact_scope(
                     self, current_state, goal_state, allow_boundary_collision
                 ):
-                    return self._plan_cspace(goal_state, current_state, max_attempts, max_attempts)
-            return self._plan_cspace(
+                    return self._plan_cspace_with_failure_evidence(
+                        goal_state, current_state, max_attempts, max_attempts,
+                    )
+            return self._plan_cspace_with_failure_evidence(
                 goal_state, current_state, max_attempts, enable_graph_attempt,
             )
+
+    def _plan_cspace_with_failure_evidence(
+        self, goal_state, current_state, max_attempts, enable_graph_attempt,
+    ):
+        """Log bounded selected-state evidence before leaving request scopes."""
+        result = self._plan_cspace(
+            goal_state, current_state, max_attempts, enable_graph_attempt,
+        )
+        if result is not None and not bool(result.success.any()):
+            from curobo._src.motion.motion_failure_diagnostics import terminal_failure_summary
+            from curobo._src.util.logging import log_warn
+
+            for kind in ("optimized", "interpolated"):
+                evidence = terminal_failure_summary(self, result, trajectory_kind=kind)
+                log_warn(f"C-space {kind} trajectory failure evidence: {evidence}")
+        return result
 
     def _plan_cspace(
         self,

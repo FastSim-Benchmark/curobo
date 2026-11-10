@@ -498,9 +498,7 @@ class TrajOptSolver:
             if seed_success:
                 best_trajopt_result = recovered
             else:
-                recovery["seed_constraint_maxima"] = (
-                    recovered.get_topk_seeds(1).debug_info or {}
-                ).get("selected_constraint_maxima", {})
+                recovery.update(self._initial_seed_failure_evidence(recovered))
             debug = dict(best_trajopt_result.debug_info or {})
             debug["initial_seed_recovery"] = recovery
             best_trajopt_result.debug_info = debug
@@ -509,6 +507,23 @@ class TrajOptSolver:
         best_trajopt_result.solve_time = opt_time
         best_trajopt_result.total_time = total_timer.stop()
         return best_trajopt_result
+
+    def _initial_seed_failure_evidence(self, recovered):
+        """Report raw seed bounds separately from the rejected optimized path."""
+        selected = recovered.get_topk_seeds(1)
+        evidence = {
+            "seed_constraint_maxima": (selected.debug_info or {}).get(
+                "selected_constraint_maxima", {}
+            ),
+        }
+        manager = self.metrics_rollout.metrics_constraint_manager
+        if manager is not None and manager.has_cost("cspace"):
+            details = joint_bound_diagnostics(
+                selected.js_solution, manager.get_cost("cspace").config,
+            )
+            evidence["seed_joint_bounds"] = details["terms"]
+            log_warn(f"Rejected initial seed raw joint-bound terms: {details['terms']}")
+        return evidence
 
     def _validate_retimed_initial_seed(self, seed, num_seeds, goal_buffer):
         """Recover only seeds passing the ordinary optimized and dense checks.

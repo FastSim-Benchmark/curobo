@@ -2,6 +2,29 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # cuRobo
 
+## Checked box tiles in bounded sphere fitting
+
+Broad, thin collision components first try a finite partition of their enclosing
+oriented boxes. Every tile's eight vertices must fit inside its assigned sphere;
+the center must remain inside its original component and the source-relative
+outward bound still applies. Centers and radii are checked after float32
+conversion. If the complete compound cannot fit the requested capacity, the
+existing bounded search runs unchanged. The independent full-volume and outward
+certificate remains mandatory; this path never truncates spheres or replaces
+volume coverage with surface samples. For checked box covers, independent
+verification rebuilds enclosing box partitions from the current source and
+checks all eight vertices of every tile against the actual returned spheres.
+This avoids nonterminating tetrahedral refinement at valid tile boundaries;
+source-interior centers and the outward bound are still checked independently.
+
+## Interior witnesses in bounded sphere fitting
+
+Bounded sphere fitting retains the current witness itself as a candidate center.
+In thin tapered solids, every directional proposal can leave the component even
+when this interior center is admissible. The candidate passes the existing
+output-precision, interior, coverage-margin and outward-distance checks; sphere
+capacity and full-volume verification remain unchanged.
+
 ## Swept obstacle bounds
 
 Swept mesh and cuboid queries compute conservative world bounds once per query
@@ -65,6 +88,12 @@ scene/contact and dense interpolated checks to pass. It does not change geometry
 contact tolerances, or planning deadlines. A recovered result records
 `initial_seed_recovery` in its debug information. Successful optimized results
 keep their existing selection and refinement behavior.
+
+Rejected original seeds also log bounded raw position and derivative violations,
+including the affected joint and its actual metric bounds. Ordinary c-space
+failures log the same optimized and interpolated geometry samples as posture
+queries, before request contact scopes are released. These logs do not alter
+planning results, budgets, constraints, or candidate selection.
 
 ## Trajectory interpolation at joint limits
 
